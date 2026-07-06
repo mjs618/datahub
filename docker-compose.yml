@@ -1,0 +1,62 @@
+
+# 多架构构建：通过 buildx 一次性产出 amd64 / arm64 / arm/v7 镜像
+#   构建并推送：  docker buildx bake --push
+#   单架构本地运行：DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up -d
+# 注意：build.platforms 需要 buildx 支持，且多架构镜像必须 push 到 registry，
+#       本地 --load 只能载入单一架构。
+version: '3.8'
+
+services:
+  data-hub:
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+        - linux/arm64
+        - linux/arm/v7
+    container_name: data-hub-service
+    restart: always
+    environment:
+      - BASE_IP=http://192.168.1.35:6543
+      - OPCUA_URL=opc.tcp://192.168.1.35:6810
+      - APP_CODE=data
+      - APP_SECRET=123456
+      - TRIG_NODE_ID=ns=2;s=Trigger
+      - TRIG_HISTORY_ID=10001:ICSSYS.Trigger
+      - POLL_INTERVAL=1
+      - LOOKBACK_MINUTES=10
+      - SETTLE_TIME=2
+      - HTTP_TIMEOUT=10
+      - HTTP_MAX_RETRIES=3
+      - HTTP_RETRY_BACKOFF=1.5
+      - OPCUA_RECONNECT_INTERVAL=5
+      - HISTORY_PAGE_SIZE=0
+      - ENABLE_WRITE_CACHE=true
+      - WRITE_CACHE_FILE=/data/data_hub_write_cache.json
+      - STATE_FILE=/data/data_hub_state.json
+      - ENABLE_DEDUP=true
+      - HEALTH_ENDPOINT_ENABLED=true
+      - HEALTH_ENDPOINT_PORT=8088
+      - HEALTH_STALE_THRESHOLD=60
+      - WATCH_LIST=["10001:ICSSYS0001.AVGV", "10002:ICSSYS0001.AVGV"]
+      - NODE_MAPPING={"10001:ICSSYS0001.AVGV":"Target:NodeA", "10002:ICSSYS0001.AVGV":"Target:NodeB"}
+    volumes:
+      # 持久化状态与失败写入缓存，避免容器重启丢失
+      - data-hub-state:/data
+    ports:
+      # 暴露健康检查端点
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:8088/health', timeout=5); sys.exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  data-hub-state:

@@ -1,0 +1,33 @@
+# Python 运行时产物
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# 日志与运行时产物
+*.log
+output.log
+test_run.log
+
+# 持久化状态文件（本地开发时可能生成）
+data_hub_state.json
+data_hub_write_cache.json
+/tmp/data_hub_*.json
+
+# Web UI 运行时配置文件
+config_runtime.json
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 操作系统
+.DS_Store
+Thumbs.db
