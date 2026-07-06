@@ -38,14 +38,20 @@ services:
       - HEALTH_ENDPOINT_ENABLED=true
       - HEALTH_ENDPOINT_PORT=8088
       - HEALTH_STALE_THRESHOLD=60
+      # Web UI 端口（容器内默认 8089，与下方端口映射保持一致）
+      - WEB_UI_PORT=8089
+      # 时区：基础镜像默认 UTC，设置后日志时间戳与本地一致
+      - TZ=Asia/Shanghai
       - WATCH_LIST=["10001:ICSSYS0001.AVGV", "10002:ICSSYS0001.AVGV"]
       - NODE_MAPPING={"10001:ICSSYS0001.AVGV":"Target:NodeA", "10002:ICSSYS0001.AVGV":"Target:NodeB"}
     volumes:
       # 持久化状态与失败写入缓存，避免容器重启丢失
       - data-hub-state:/data
     ports:
-      # 暴露健康检查端点
+      # 健康检查端点
       - "8088:8088"
+      # Web UI 控制台（Data Hub 控制台 / 配置编辑 / 节点浏览）
+      - "8089:8089"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:8088/health', timeout=5); sys.exit(0 if r.status==200 else 1)"]
       interval: 30s

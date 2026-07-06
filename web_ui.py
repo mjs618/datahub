@@ -963,12 +963,16 @@ class WebUIServer:
     """
 
     def __init__(self, opcua_url, trigger_sync_callback, status_getter,
-                 metrics_getter=None, trigger_state_getter=None, port=8089):
+                 metrics_getter=None, trigger_state_getter=None, port=8089,
+                 task_trigger_callback=None, task_status_getter=None):
         self.opcua_url = opcua_url
         self.trigger_sync_callback = trigger_sync_callback
         self.status_getter = status_getter
         self.metrics_getter = metrics_getter
         self.trigger_state_getter = trigger_state_getter
+        # 多任务模式回调（可选）
+        self.task_trigger_callback = task_trigger_callback
+        self.task_status_getter = task_status_getter
         self.port = int(os.getenv("WEB_UI_PORT", port))
         self._server = None
         self._thread = None
@@ -1058,6 +1062,16 @@ class WebUIServer:
                         self._send_json(500, {"error": "get trigger state failed", "detail": str(e)})
                     return
 
+                if path == "/api/tasks/status":
+                    try:
+                        if server_self.task_status_getter:
+                            self._send_json(200, server_self.task_status_getter())
+                        else:
+                            self._send_json(200, {"tasks": []})
+                    except Exception as e:
+                        self._send_json(500, {"error": "get tasks status failed", "detail": str(e)})
+                    return
+
                 self._send_json(404, {"error": "not found", "detail": f"unknown path: {path}"})
 
             # ---- POST 路由 ----
@@ -1075,6 +1089,10 @@ class WebUIServer:
 
                 if path == "/api/trigger_sync":
                     self._handle_trigger_sync()
+                    return
+
+                if path == "/api/tasks/trigger":
+                    self._handle_task_trigger()
                     return
 
                 self._send_json(404, {"error": "not found", "detail": f"unknown path: {path}"})
@@ -1168,6 +1186,25 @@ class WebUIServer:
                     self._send_json(200, {"status": "triggered"})
                 except Exception as e:
                     self._send_json(500, {"error": "trigger failed", "detail": str(e)})
+
+            def _handle_task_trigger(self):
+                try:
+                    if not server_self.task_trigger_callback:
+                        self._send_json(503, {"error": "task mode disabled", "detail": "TASK_MODE != multi"})
+                        return
+                    body = self._read_body()
+                    data = json.loads(body.decode("utf-8")) if body else {}
+                    task_id = data.get("task_id")
+                    if not task_id:
+                        self._send_json(400, {"error": "missing task_id", "detail": "body must include 'task_id'"})
+                        return
+                    result = server_self.task_trigger_callback(task_id)
+                    code = 200 if result.get("status") == "triggered" else 400
+                    self._send_json(code, result)
+                except json.JSONDecodeError as e:
+                    self._send_json(400, {"error": "invalid json", "detail": str(e)})
+                except Exception as e:
+                    self._send_json(500, {"error": "task trigger failed", "detail": str(e)})
 
         self._server = ThreadingHTTPServer(("0.0.0.0", self.port), Handler)
         self._thread = threading.Thread(

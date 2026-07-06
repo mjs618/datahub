@@ -116,6 +116,13 @@ class Config:
     # 历史时间戳单位：'ms'（毫秒，默认）或 's'（秒）
     HISTORY_TIMESTAMP_UNIT = os.getenv("HISTORY_TIMESTAMP_UNIT", "ms")
 
+    # ========== 多任务模式（通讯点(1).xlsx 定义的 12 个任务） ==========
+    # 运行模式：'multi' = 12 任务轮询（默认）/ 'single' = 原单触发边沿模式
+    TASK_MODE = os.getenv("TASK_MODE", "multi")
+    # 回写通道：'opcua' = 通过 OPC UA 写回设计器点（默认，目标是 u11 点）/
+    #           'rtdb'  = 通过实时库写值接口回写
+    WRITE_BACK_VIA = os.getenv("WRITE_BACK_VIA", "opcua")
+
     # Nodes to Watch (JSON string in env)
     DEFAULT_WATCH_LIST = [
         "10001:ICSSYS0001.AVGV",
@@ -212,4 +219,6 @@ def get_runtime_config_snapshot():
         "POLL_INTERVAL": config.POLL_INTERVAL,
         "LOOKBACK_MINUTES": config.LOOKBACK_MINUTES,
         "SETTLE_TIME": config.SETTLE_TIME,
+        "TASK_MODE": config.TASK_MODE,
+        "WRITE_BACK_VIA": config.WRITE_BACK_VIA,
     }

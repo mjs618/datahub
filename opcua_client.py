@@ -90,15 +90,58 @@ class OPCUAController:
             None       - 读取失败（连接断开或异常）
         失败时返回 None 而非 False，避免被误判为下降沿。
         """
+        value = await self.read_value(trigger_node_id)
+        if value is None:
+            return None
+        return bool(value)
+
+    async def read_value(self, node_id):
+        """
+        通用读单点。
+        返回：
+            value - 成功读取到的原始值（bool/int/float/str 等）
+            None  - 读取失败（连接断开或异常）
+        """
         if not await self.ensure_connected():
             return None
-
         try:
-            node = self.client.get_node(trigger_node_id)
+            node = self.client.get_node(node_id)
             value = await node.read_value()
-            return bool(value)
+            return value
         except Exception as e:
-            self.logger.error(f"Error reading OPCUA trigger: {e}")
-            # 标记断连，下个循环会尝试重连
+            self.logger.error(f"Error reading OPCUA node {node_id}: {e}")
             self._connected = False
             return None
+
+    async def read_values(self, node_ids):
+        """
+        批量读取多个节点。
+        返回 dict: {node_id: value}。
+        读取失败的节点 value 为 None（不抛异常，不中断其余节点）。
+        空列表返回空 dict。
+        内部未使用 OPC UA 的批量 Read 服务，而是顺序读取以保证兼容性
+        与稳定的失败隔离；12 个节点量级下开销可忽略。
+        """
+        result = {}
+        if not node_ids:
+            return result
+        for nid in node_ids:
+            result[nid] = await self.read_value(nid)
+        return result
+
+    async def write_value(self, node_id, value):
+        """
+        通用写单点。
+        返回 True 表示写入成功，False 表示失败（连接断开或异常）。
+        """
+        if not await self.ensure_connected():
+            return False
+        try:
+            node = self.client.get_node(node_id)
+            await node.write_value(value)
+            self.logger.info(f"OPCUA write ok: {node_id} <- {value!r}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error writing OPCUA node {node_id}: {e}")
+            self._connected = False
+            return False

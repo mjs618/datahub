@@ -12,6 +12,7 @@ from state_manager import StateManager
 from health_server import Metrics, HealthServer
 from web_ui import WebUIServer
 from config import config
+import tasks_config
 
 # 日志格式：包含时间、级别、模块名、线程名，便于排查
 logging.basicConfig(
@@ -19,6 +20,34 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - [%(threadName)s] %(name)s - %(message)s'
 )
 logger = logging.getLogger("data-hub")
+
+
+def _assemble_time(comp_values, components):
+    """
+    将时间分量节点值拼装为 'yyyy-MM-dd HH:mm:ss' 字符串。
+    comp_values: {node_id: value} （来自 OPC UA 批量读取）
+    components: {'year': node_id, 'mon': node_id, ...} （见 tasks_config._components）
+    返回字符串；任一分量缺失或无法转 int 时返回 None。
+    """
+    order = ("year", "mon", "day", "hour", "min", "sec")
+    try:
+        nums = []
+        for key in order:
+            nid = components[key]
+            v = comp_values.get(nid)
+            if v is None:
+                return None
+            n = int(v)
+            nums.append(n)
+    except (ValueError, TypeError) as e:
+        logger.warning(f"_assemble_time: invalid component value ({e}), components={components}")
+        return None
+    y, mo, d, h, mi, s = nums
+    # 基本合法性校验（不抛异常，仅拦截明显非法值）
+    if not (1970 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31
+            and 0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59):
+        logger.warning(f"_assemble_time: out-of-range value {nums}, will still assemble")
+    return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:{s:02d}"
 
 
 class DataHubService:
@@ -61,6 +90,21 @@ class DataHubService:
         # 最近一次触发信号读取值（供 Web UI 概览页展示），None 表示尚未读到
         self._last_trigger_value = None
 
+        # ========== 多任务模式状态（通讯点(1).xlsx 定义的 12 个任务） ==========
+        # 每个任务记录：ac_prev（上次 AC 值）、processing（是否处理中，防重入）、
+        #               last_result（最近一次处理结果摘要，供 Web UI 展示）
+        self._task_state = {}
+        for t in tasks_config.TASKS:
+            self._task_state[t["id"]] = {
+                "task": t,
+                "ac_prev": None,        # None=未知，True/False=上次读到的 AC 值
+                "processing": False,    # 防重入标志
+                "last_result": None,    # {"status","detail","timestamp"}
+            }
+        # Web UI 手动触发指定任务的请求队列：{task_id: True}
+        self._manual_task_requests = {}
+        self._manual_task_lock = threading.Lock()
+
         # Web UI 服务（端口 8089）
         self.web_ui = WebUIServer(
             opcua_url=config.OPCUA_URL,
@@ -68,6 +112,8 @@ class DataHubService:
             status_getter=self._get_manual_sync_status,
             metrics_getter=self.metrics.snapshot,
             trigger_state_getter=self._get_trigger_state,
+            task_trigger_callback=self.request_task_trigger,
+            task_status_getter=self.get_tasks_status,
         )
 
         self._stop_event = asyncio.Event()
@@ -109,7 +155,13 @@ class DataHubService:
             logger.error(f"Initial OPC UA connect failed: {e}, will retry in loop")
             self.metrics.set_opcua_connected(False)
 
-        await self._run_loop()
+        # 按运行模式进入对应主循环
+        if config.TASK_MODE == "multi":
+            logger.info(f"TASK_MODE=multi, entering task loop ({len(tasks_config.TASKS)} tasks)")
+            await self._run_task_loop()
+        else:
+            logger.info("TASK_MODE=single, entering legacy single-trigger loop")
+            await self._run_loop()
 
     def _request_stop(self):
         logger.info("Stop signal received, shutting down...")
@@ -287,6 +339,252 @@ class DataHubService:
             await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
         except asyncio.TimeoutError:
             pass
+
+    # ========== 多任务模式（12 任务调度） ==========
+
+    async def _run_task_loop(self):
+        """多任务主循环：轮询所有任务的 AC 触发点，检测上升沿并派发处理。"""
+        logger.info(
+            f"Task Loop Started (tasks={len(tasks_config.TASKS)}, "
+            f"POLL_INTERVAL={config.POLL_INTERVAL}s, SETTLE_TIME={config.SETTLE_TIME}s, "
+            f"WRITE_BACK_VIA={config.WRITE_BACK_VIA})"
+        )
+        ac_nodes = tasks_config.all_ac_nodes()
+
+        while not self._stop_event.is_set():
+            try:
+                self.metrics.mark_loop()
+                await self._ensure_opcua_connected()
+
+                # 处理 Web UI 手动触发的任务
+                await self._drain_manual_task_requests()
+
+                # 批量读取所有 AC 当前值
+                current_values = await self.opcua.read_values(ac_nodes)
+                self.metrics.set_opcua_connected(self.opcua.connected)
+
+                for t in tasks_config.TASKS:
+                    tid = t["id"]
+                    st = self._task_state[tid]
+                    ac_node = t["ac_node"]
+                    raw = current_values.get(ac_node)
+                    # None 表示读取失败，跳过边沿判断
+                    if raw is None:
+                        continue
+                    current = bool(raw)
+
+                    prev = st["ac_prev"]
+                    # 首次成功读取只记录，不触发
+                    if prev is None:
+                        st["ac_prev"] = current
+                        logger.info(f"Task {tid}: first AC read = {current}")
+                        continue
+
+                    # 上升沿 0 -> 1（即"状态变成1"）
+                    if prev is False and current is True:
+                        logger.info(f"===== Task {tid} triggered (AC rising edge 0->1) =====")
+                        self.metrics.mark_trigger()
+                        await self._dispatch_task(tid)
+
+                    st["ac_prev"] = current
+            except Exception as e:
+                logger.exception(f"Task loop iteration error: {e}")
+
+            await self._sleep_or_stop(config.POLL_INTERVAL)
+
+        logger.info("Task loop exited (stop event set)")
+
+    async def _drain_manual_task_requests(self):
+        """处理 Web UI 手动触发指定任务的请求（如有）。"""
+        with self._manual_task_lock:
+            pending = dict(self._manual_task_requests)
+            self._manual_task_requests.clear()
+        for tid in pending:
+            logger.info(f"===== Task {tid} manually triggered via Web UI =====")
+            self.metrics.mark_trigger()
+            await self._dispatch_task(tid)
+
+    async def _dispatch_task(self, task_id):
+        """派发单个任务：防重入 + 异常隔离。"""
+        st = self._task_state.get(task_id)
+        if st is None:
+            logger.warning(f"Task {task_id}: unknown task id, ignored")
+            return
+        if st["processing"]:
+            logger.warning(f"Task {task_id}: already processing, skip this trigger")
+            return
+        st["processing"] = True
+        try:
+            await self._handle_task(st["task"])
+            st["last_result"] = {
+                "status": "completed", "detail": "", "timestamp": time.time(),
+            }
+        except Exception as e:
+            logger.exception(f"Task {task_id} failed with exception: {e}")
+            st["last_result"] = {
+                "status": "failed", "detail": str(e), "timestamp": time.time(),
+            }
+        finally:
+            st["processing"] = False
+            logger.info(f"===== Task {task_id} cycle finished =====")
+
+    async def _handle_task(self, task):
+        """
+        单任务处理流程：
+          1. 确保 token 有效
+          2. 沉淀等待历史落库
+          3. 读 12 个时间分量，拼成开始/结束时间
+          4. 调历史 API 拉数据
+          5. 取每点最后有效值，回写到目标点
+          6. 成功后置 FC=1
+        """
+        tid = task["id"]
+        logger.info(f"Task {tid}: ----- sync started -----")
+
+        # 0. token
+        if not await self._ensure_token():
+            logger.warning(f"Task {tid}: no valid token, abort")
+            self.metrics.mark_sync(False, "no valid token")
+            return
+
+        # 1. 沉淀
+        logger.info(f"Task {tid}: settling {config.SETTLE_TIME}s for history ingestion...")
+        await self._sleep_or_stop(config.SETTLE_TIME)
+        if self._stop_event.is_set():
+            logger.info(f"Task {tid}: stop during settle, abort")
+            return
+
+        # 2. 读时间分量
+        start_components = task["start_components"]
+        end_components = task["end_components"]
+        all_comp_nodes = list(start_components.values()) + list(end_components.values())
+        comp_values = await self.opcua.read_values(all_comp_nodes)
+        self.metrics.set_opcua_connected(self.opcua.connected)
+
+        start_str = _assemble_time(comp_values, start_components)
+        end_str = _assemble_time(comp_values, end_components)
+        if not start_str or not end_str:
+            logger.error(
+                f"Task {tid}: failed to assemble time from components "
+                f"(start_str={start_str!r}, end_str={end_str!r}, raw={comp_values}), abort"
+            )
+            self.metrics.mark_sync(False, "bad time components")
+            return
+        logger.info(f"Task {tid}: time range start={start_str} end={end_str}")
+
+        # 3. 拉历史数据
+        history_ids = [p["history_id"] for p in task["points"]]
+        logger.info(f"Task {tid}: fetching history for {history_ids}")
+        history_data = self.history.get_history_data(start_str, end_str, history_ids)
+        if not history_data:
+            logger.warning(f"Task {tid}: no history data returned, abort")
+            self.metrics.mark_sync(False, "empty history")
+            return
+
+        # 4. 取每点最后有效值，组装回写负载
+        #    以 history_id 为键便于匹配
+        last_by_id = {}
+        for node_entry in history_data:
+            nid = node_entry.get("nodeId")
+            points = node_entry.get("data", []) or []
+            if not points:
+                continue
+            points_sorted = sorted(points, key=lambda p: p.get("t", 0))
+            last_val = points_sorted[-1].get("v")
+            if last_val is not None:
+                last_by_id[nid] = last_val
+
+        write_payload = []  # [{"node": target_node, "value": v}] (opcua) 或 [{"nodeId":..,"value":..}] (rtdb)
+        for p in task["points"]:
+            hid = p["history_id"]
+            tgt = p["target_node"]
+            val = last_by_id.get(hid)
+            if val is None:
+                logger.warning(f"Task {tid}: source {hid} has no valid last value, skip {tgt}")
+                continue
+            if config.WRITE_BACK_VIA == "opcua":
+                write_payload.append({"node": tgt, "value": val, "history_id": hid})
+            else:
+                write_payload.append({"nodeId": tgt, "value": val, "history_id": hid})
+            logger.info(f"Task {tid}: {hid} -> {tgt} = {val!r}")
+
+        if not write_payload:
+            logger.warning(f"Task {tid}: no valid points to write, abort")
+            self.metrics.mark_sync(False, "no valid points")
+            return
+
+        # 5. 回写
+        write_ok = False
+        if config.WRITE_BACK_VIA == "opcua":
+            ok_count = 0
+            for item in write_payload:
+                if await self.opcua.write_value(item["node"], item["value"]):
+                    ok_count += 1
+            write_ok = (ok_count == len(write_payload))
+            logger.info(
+                f"Task {tid}: OPC UA write-back {ok_count}/{len(write_payload)} "
+                f"{'SUCCESS' if write_ok else 'PARTIAL/FAILED'}"
+            )
+        else:
+            rtdb_payload = [{"nodeId": it["nodeId"], "value": it["value"]} for it in write_payload]
+            result = self.rtdb.write_realtime_data(rtdb_payload)
+            write_ok = bool(result.get("success"))
+            logger.info(
+                f"Task {tid}: RTDB write-back {'SUCCESS' if write_ok else 'FAILED'} "
+                f"(code={result.get('code')}, message={result.get('message')})"
+            )
+
+        if not write_ok:
+            self.metrics.mark_sync(False, "write-back failed")
+            logger.error(f"Task {tid}: write-back failed, FC will NOT be set")
+            return
+
+        # 6. 置 FC=1（仅在回写全部成功后）
+        fc_node = task["fc_node"]
+        fc_ok = await self.opcua.write_value(fc_node, True)
+        if fc_ok:
+            logger.info(f"Task {tid}: FC=1 set ({fc_node})")
+            self.metrics.mark_sync(True, "ok")
+        else:
+            logger.error(f"Task {tid}: write-back ok but FC=1 FAILED ({fc_node})")
+            self.metrics.mark_sync(False, "FC write failed")
+            return
+
+        logger.info(f"Task {tid}: ----- sync completed SUCCESS -----")
+
+    # ---------- Web UI 任务回调 ----------
+
+    def request_task_trigger(self, task_id):
+        """Web UI 调用：请求主循环处理指定任务。"""
+        if task_id not in self._task_state:
+            return {"status": "error", "error": f"unknown task id: {task_id}"}
+        with self._manual_task_lock:
+            already = self._manual_task_requests.get(task_id, False)
+            self._manual_task_requests[task_id] = True
+        if already:
+            logger.info(f"Task {task_id}: manual trigger already pending, ignored duplicate")
+        else:
+            logger.info(f"Task {task_id}: manual trigger requested via Web UI")
+        return {"status": "triggered", "task_id": task_id}
+
+    def get_tasks_status(self):
+        """Web UI 调用：返回所有任务的状态摘要。"""
+        out = []
+        for t in tasks_config.TASKS:
+            tid = t["id"]
+            st = self._task_state.get(tid, {})
+            out.append({
+                "id": tid,
+                "module": t["module"],
+                "source": t["source"],
+                "desc": t["desc"],
+                "ac_node": t["ac_node"],
+                "fc_node": t["fc_node"],
+                "processing": st.get("processing", False),
+                "ac_prev": st.get("ac_prev"),
+                "last_result": st.get("last_result"),
+            })
+        return {"tasks": out}
 
     # ---------- 同步流程 ----------
 
