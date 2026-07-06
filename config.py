@@ -212,9 +212,4 @@ def get_runtime_config_snapshot():
         "POLL_INTERVAL": config.POLL_INTERVAL,
         "LOOKBACK_MINUTES": config.LOOKBACK_MINUTES,
         "SETTLE_TIME": config.SETTLE_TIME,
-        "HTTP_TIMEOUT": config.HTTP_TIMEOUT,
-        "HISTORY_PAGE_SIZE": config.HISTORY_PAGE_SIZE,
-        "ENABLE_DEDUP": config.ENABLE_DEDUP,
-        "ENABLE_WRITE_CACHE": config.ENABLE_WRITE_CACHE,
-        "HEALTH_ENDPOINT_ENABLED": config.HEALTH_ENDPOINT_ENABLED,
     }

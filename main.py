@@ -58,12 +58,16 @@ class DataHubService:
         self._manual_sync_requested = False
         self._manual_sync_lock = threading.Lock()
         self._last_manual_sync_result = None
+        # 最近一次触发信号读取值（供 Web UI 概览页展示），None 表示尚未读到
+        self._last_trigger_value = None
 
         # Web UI 服务（端口 8089）
         self.web_ui = WebUIServer(
             opcua_url=config.OPCUA_URL,
             trigger_sync_callback=self._request_manual_sync,
             status_getter=self._get_manual_sync_status,
+            metrics_getter=self.metrics.snapshot,
+            trigger_state_getter=self._get_trigger_state,
         )
 
         self._stop_event = asyncio.Event()
@@ -150,6 +154,13 @@ class DataHubService:
                 "last_result": self._last_manual_sync_result,
             }
 
+    def _get_trigger_state(self):
+        """Web UI 调用：查询当前触发信号状态与 OPC UA 连接状态"""
+        return {
+            "opcua_connected": bool(self.opcua.connected),
+            "trigger_value": self._last_trigger_value,
+        }
+
     async def _ensure_token(self):
         """确保 token 有效，过期则刷新并重建客户端"""
         logger.info("Step 0: Checking token validity...")
@@ -223,6 +234,9 @@ class DataHubService:
                     # 等待下一周期重连
                     await self._sleep_or_stop(config.POLL_INTERVAL)
                     continue
+
+                # 缓存最近一次触发值，供 Web UI 概览页展示
+                self._last_trigger_value = current
 
                 # 首次成功读取时打印一次状态
                 if prev_trigger is None:
