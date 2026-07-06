@@ -851,13 +851,14 @@ async function loadSyncStatus() {
 let overviewTimer = null;
 
 async function refreshOverview() {
-  let m = null, ts = null;
+  let m = null, ts = null, cfg = null;
   try {
-    const [mr, tr] = await Promise.all([
+    const [mr, tr, cr] = await Promise.all([
       fetch('/api/metrics').then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/trigger_state').then(r => r.ok ? r.json() : null).catch(() => null)
+      fetch('/api/trigger_state').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/config').then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
-    m = mr; ts = tr;
+    m = mr; ts = tr; cfg = cr;
   } catch (e) { return; }
 
   if (ts) {
@@ -902,6 +903,9 @@ async function refreshOverview() {
   $('ov-uptime').textContent = fmtUptime(m.uptime_seconds);
   $('header-uptime').textContent = m.uptime_seconds ? '运行 ' + fmtUptime(m.uptime_seconds) : '';
   $('ov-started').textContent = fmtTime(m.started_at);
+  if (cfg && cfg.POLL_INTERVAL != null) {
+    $('ov-poll').textContent = cfg.POLL_INTERVAL + ' 秒';
+  }
 
   // 手动同步状态合并展示
   try {
@@ -935,6 +939,13 @@ loadConfig();
 loadTopNodes();
 initCsvDropzone();
 startOverviewRefresh();
+
+// 支持通过 URL hash 直接定位 Tab（如 #config / #sync），便于深链接与截图
+(function initHashTab() {
+  const valid = ['overview', 'config', 'nodes', 'csv', 'sync'];
+  const tab = (location.hash || '').replace('#', '');
+  if (valid.indexOf(tab) >= 0) switchTab(tab);
+})();
 </script>
 </body>
 </html>"""
