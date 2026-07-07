@@ -34,7 +34,12 @@ class FakeOPCUA:
             "MIN_AGC11": 55,
             "SEC_AGC11": 0,
         }
-        return {node_id: values.get(node_id.split("=")[-1]) for node_id in node_ids}
+        result = {}
+        for node_id in node_ids:
+            point_item = node_id.split(";s=", 1)[-1]
+            point_name = point_item.split(".", 1)[0]
+            result[node_id] = values.get(point_name)
+        return result
 
     async def write_value(self, node_id, value):
         self.writes.append((node_id, value))
@@ -105,6 +110,14 @@ def test_task_mode_defaults_to_rtdb_writeback():
     assert config.WRITE_BACK_VIA == "rtdb"
 
 
+def test_task_node_ids_use_site_namespace_and_dv_av_suffixes():
+    agc01 = tasks_config.task_by_id("AGC01")
+    assert agc01["ac_node"] == "ns=10011;s=AC_AGC01.DV"
+    assert agc01["fc_node"] == "ns=10011;s=FC_AGC01.DV"
+    assert agc01["start_components"]["year"] == "ns=10011;s=YEAR_AGC01.AV"
+    assert agc01["end_components"]["sec"] == "ns=10011;s=SEC_AGC11.AV"
+
+
 def test_agc01_replays_all_history_values_to_rtdb_then_sets_fc():
     service = asyncio.run(run_agc01_replay())
 
@@ -127,7 +140,7 @@ def test_agc01_replays_all_history_values_to_rtdb_then_sets_fc():
             False,
         )
     ]
-    assert service.opcua.writes == [("ns=2;s=FC_AGC01", True)]
+    assert service.opcua.writes == [("ns=10011;s=FC_AGC01.DV", True)]
     task = next(t for t in service.get_tasks_status()["tasks"] if t["id"] == "AGC01")
     assert task["current_stage"] == "idle"
     assert task["last_result"]["status"] == "completed"
@@ -160,11 +173,12 @@ def test_agc01_replay_batches_rtdb_writes():
             False,
         ),
     ]
-    assert service.opcua.writes == [("ns=2;s=FC_AGC01", True)]
+    assert service.opcua.writes == [("ns=10011;s=FC_AGC01.DV", True)]
 
 
 if __name__ == "__main__":
     test_task_mode_defaults_to_rtdb_writeback()
+    test_task_node_ids_use_site_namespace_and_dv_av_suffixes()
     test_agc01_replays_all_history_values_to_rtdb_then_sets_fc()
     test_agc01_replay_batches_rtdb_writes()
     print("task replay tests passed")

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from asyncua import Client
+from asyncua import Client, ua
 
 
 class OPCUAController:
@@ -108,6 +108,9 @@ class OPCUAController:
             node = self.client.get_node(node_id)
             value = await node.read_value()
             return value
+        except ua.UaStatusCodeError as e:
+            self.logger.error(f"Error reading OPCUA node {node_id}: {e}")
+            return None
         except Exception as e:
             self.logger.error(f"Error reading OPCUA node {node_id}: {e}")
             self._connected = False
@@ -141,6 +144,9 @@ class OPCUAController:
             await node.write_value(value)
             self.logger.info(f"OPCUA write ok: {node_id} <- {value!r}")
             return True
+        except ua.UaStatusCodeError as e:
+            self.logger.error(f"Error writing OPCUA node {node_id}: {e}")
+            return False
         except Exception as e:
             self.logger.error(f"Error writing OPCUA node {node_id}: {e}")
             self._connected = False

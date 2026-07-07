@@ -8,18 +8,20 @@
   - 结束时间分量 YEAR/MON/DAY/HOUR/MIN/SEC_<mod><en>  （en = 11..14）
   - 数据源（历史库 DCS 点）→ RTDB 回写目标（设计器点 u11）
 
-OPC UA 节点 ID 现为占位形式 `ns=2;s=<点名>`。
-待用户提供真实节点表后，仅需替换 _node(...) 的命名规则即可。
+OPC UA 节点 ID 规则：
+  - 开关量（AC/FC）使用 `.DV`
+  - 模拟量（时间分量、结果点）使用 `.AV`
+  - 现场命名空间为 10011
 """
 
 
-# OPC UA 节点 ID 命名规则（占位）。提供真实节点表后修改此处一处即可生效。
-OPCUA_NS = 2
+# OPC UA 节点 ID 命名规则。
+OPCUA_NS = 10011
 
 
-def _node(point_name: str) -> str:
-    """由点名构造 OPC UA nodeid（占位规则）。"""
-    return f"ns={OPCUA_NS};s={point_name}"
+def _node(point_name: str, item: str) -> str:
+    """由点名和点项构造 OPC UA NodeId。item: DV=开关量，AV=模拟量。"""
+    return f"ns={OPCUA_NS};s={point_name}.{item}"
 
 
 def _components(mod: str, suffix: str) -> dict:
@@ -30,12 +32,12 @@ def _components(mod: str, suffix: str) -> dict:
     返回: {year/mon/day/hour/min/sec -> nodeid}
     """
     return {
-        "year": _node(f"YEAR_{mod}{suffix}"),
-        "mon":  _node(f"MON_{mod}{suffix}"),
-        "day":  _node(f"DAY_{mod}{suffix}"),
-        "hour": _node(f"HOUR_{mod}{suffix}"),
-        "min":  _node(f"MIN_{mod}{suffix}"),
-        "sec":  _node(f"SEC_{mod}{suffix}"),
+        "year": _node(f"YEAR_{mod}{suffix}", "AV"),
+        "mon":  _node(f"MON_{mod}{suffix}", "AV"),
+        "day":  _node(f"DAY_{mod}{suffix}", "AV"),
+        "hour": _node(f"HOUR_{mod}{suffix}", "AV"),
+        "min":  _node(f"MIN_{mod}{suffix}", "AV"),
+        "sec":  _node(f"SEC_{mod}{suffix}", "AV"),
     }
 
 
@@ -56,13 +58,13 @@ def _task(mod, n, sn, en, source, desc,
         "module": mod,
         "source": source,
         "desc": desc,
-        "ac_node": _node(f"AC_{mod}{n}"),
-        "fc_node": _node(f"FC_{mod}{n}"),
+        "ac_node": _node(f"AC_{mod}{n}", "DV"),
+        "fc_node": _node(f"FC_{mod}{n}", "DV"),
         "start_components": _components(mod, sn),
         "end_components": _components(mod, en),
         "points": [
-            {"history_id": h_instr, "target_id": tgt_instr, "target_node": _node(tgt_instr)},
-            {"history_id": h_fb,    "target_id": tgt_fb,    "target_node": _node(tgt_fb)},
+            {"history_id": h_instr, "target_id": tgt_instr, "target_node": _node(tgt_instr, "AV")},
+            {"history_id": h_fb,    "target_id": tgt_fb,    "target_node": _node(tgt_fb, "AV")},
         ],
     }
 
