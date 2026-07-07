@@ -29,8 +29,18 @@ _RUNTIME_CACHE = _load_runtime_config()
 
 class Config:
     # API & Connection Settings
-    BASE_IP = os.getenv("BASE_IP", "http://192.168.1.35:6543")
-    OPCUA_URL = os.getenv("OPCUA_URL", "opc.tcp://192.168.1.35:6810")
+    DEFAULT_BASE_IP = os.getenv("BASE_IP", "http://192.168.1.35:6543")
+    DEFAULT_OPCUA_URL = os.getenv("OPCUA_URL", "opc.tcp://192.168.1.35:6810")
+
+    @property
+    def BASE_IP(self):
+        v = _RUNTIME_CACHE.get("BASE_IP")
+        return v if v is not None else self.DEFAULT_BASE_IP
+
+    @property
+    def OPCUA_URL(self):
+        v = _RUNTIME_CACHE.get("OPCUA_URL")
+        return v if v is not None else self.DEFAULT_OPCUA_URL
 
     # Auth Settings
     APP_CODE = os.getenv("APP_CODE", "data")
@@ -103,6 +113,12 @@ class Config:
     WRITE_CACHE_MAX_AGE_HOURS = int(os.getenv("WRITE_CACHE_MAX_AGE_HOURS", "24"))
     WRITE_CACHE_MAX_ENTRIES = int(os.getenv("WRITE_CACHE_MAX_ENTRIES", "1000"))
     RETRY_FAILED_CACHE_ON_CYCLE = os.getenv("RETRY_FAILED_CACHE_ON_CYCLE", "true").lower() == "true"
+    DEFAULT_RTDB_REPLAY_BATCH_SIZE = int(os.getenv("RTDB_REPLAY_BATCH_SIZE", "500"))
+
+    @property
+    def RTDB_REPLAY_BATCH_SIZE(self):
+        v = _RUNTIME_CACHE.get("RTDB_REPLAY_BATCH_SIZE")
+        return v if v is not None else self.DEFAULT_RTDB_REPLAY_BATCH_SIZE
 
     # 状态持久化（去重 + 重启恢复）
     STATE_FILE = os.getenv("STATE_FILE", "/tmp/data_hub_state.json")
@@ -118,10 +134,19 @@ class Config:
 
     # ========== 多任务模式（通讯点(1).xlsx 定义的 12 个任务） ==========
     # 运行模式：'multi' = 12 任务轮询（默认）/ 'single' = 原单触发边沿模式
-    TASK_MODE = os.getenv("TASK_MODE", "multi")
-    # 回写通道：'opcua' = 通过 OPC UA 写回设计器点（默认，目标是 u11 点）/
-    #           'rtdb'  = 通过实时库写值接口回写
-    WRITE_BACK_VIA = os.getenv("WRITE_BACK_VIA", "opcua")
+    DEFAULT_TASK_MODE = os.getenv("TASK_MODE", "multi")
+    # 多任务结果回写通道：通过实时库写值接口回写；FC 反馈点仍通过 OPC UA 写回
+    DEFAULT_WRITE_BACK_VIA = os.getenv("WRITE_BACK_VIA", "rtdb")
+
+    @property
+    def TASK_MODE(self):
+        v = _RUNTIME_CACHE.get("TASK_MODE")
+        return v if v is not None else self.DEFAULT_TASK_MODE
+
+    @property
+    def WRITE_BACK_VIA(self):
+        v = _RUNTIME_CACHE.get("WRITE_BACK_VIA")
+        return v if v is not None else self.DEFAULT_WRITE_BACK_VIA
 
     # Nodes to Watch (JSON string in env)
     DEFAULT_WATCH_LIST = [
@@ -221,4 +246,5 @@ def get_runtime_config_snapshot():
         "SETTLE_TIME": config.SETTLE_TIME,
         "TASK_MODE": config.TASK_MODE,
         "WRITE_BACK_VIA": config.WRITE_BACK_VIA,
+        "RTDB_REPLAY_BATCH_SIZE": config.RTDB_REPLAY_BATCH_SIZE,
     }

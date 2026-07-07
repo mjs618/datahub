@@ -6,7 +6,7 @@
   - 结束反馈 FC_<mod><n>    ：任务完成后置 1
   - 开始时间分量 YEAR/MON/DAY/HOUR/MIN/SEC_<mod><sn>  （sn = 01..04）
   - 结束时间分量 YEAR/MON/DAY/HOUR/MIN/SEC_<mod><en>  （en = 11..14）
-  - 数据源（历史库 DCS 点）→ 回写目标（设计器点 u11）
+  - 数据源（历史库 DCS 点）→ RTDB 回写目标（设计器点 u11）
 
 OPC UA 节点 ID 现为占位形式 `ns=2;s=<点名>`。
 待用户提供真实节点表后，仅需替换 _node(...) 的命名规则即可。
@@ -61,8 +61,8 @@ def _task(mod, n, sn, en, source, desc,
         "start_components": _components(mod, sn),
         "end_components": _components(mod, en),
         "points": [
-            {"history_id": h_instr, "target_node": _node(tgt_instr)},
-            {"history_id": h_fb,    "target_node": _node(tgt_fb)},
+            {"history_id": h_instr, "target_id": tgt_instr, "target_node": _node(tgt_instr)},
+            {"history_id": h_fb,    "target_id": tgt_fb,    "target_node": _node(tgt_fb)},
         ],
     }
 

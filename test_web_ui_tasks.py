@@ -9,13 +9,23 @@
 5. GET /api/config 包含 TASK_MODE / WRITE_BACK_VIA 字段
 6. POST /api/config 接受清空 WATCH_LIST/NODE_MAPPING
 7. 首页 HTML 包含新增的「任务管理」Tab 标识
+8. POST /api/config 接受连接信息与运行模式配置
+9. 配置响应标记连接/运行配置需要重启，并支持 RTDB_REPLAY_BATCH_SIZE
 """
 import json
+import os
+import tempfile
 import threading
 import time
 import urllib.request
 import urllib.error
 import sys
+
+# 测试必须使用独立 runtime 配置，避免污染本地运行中的 Web UI 配置。
+TEST_RUNTIME_CONFIG_FILE = os.path.join(
+    tempfile.gettempdir(), f"datahub_test_config_runtime_{os.getpid()}.json"
+)
+os.environ["RUNTIME_CONFIG_FILE"] = TEST_RUNTIME_CONFIG_FILE
 
 from web_ui import WebUIServer
 from tasks_config import TASKS
@@ -83,6 +93,13 @@ def main():
         assert "clearWatchList()" in body, "HTML 未包含 clearWatchList 函数"
         assert "resetConfigForm()" in body, "HTML 未包含 resetConfigForm 函数"
         assert "applySyncModeHint" in body, "HTML 未包含 applySyncModeHint 函数"
+        assert "单触发模式配置" in body, "配置页未说明 TRIG_* 仅用于单触发模式"
+        assert "multi 模式多任务触发点来自任务管理中的 AC_* 节点" in body, "配置页未说明多任务触发点来源"
+        assert "用于从历史库回查触发脉冲区间" in body, "配置页未说明 TRIG_HISTORY_ID 的用途"
+        assert 'id="cfg-base-ip" class="readonly-input" readonly' not in body, "BASE_IP 不应只读"
+        assert 'id="cfg-opcua-url" class="readonly-input" readonly' not in body, "OPCUA_URL 不应只读"
+        assert 'id="cfg-task-mode" class="readonly-input" readonly' not in body, "TASK_MODE 不应只读"
+        assert 'id="cfg-write-back-via" class="readonly-input" readonly' not in body, "WRITE_BACK_VIA 不应只读"
         print("[OK] 1. 首页 HTML 含任务管理 Tab 与新函数")
 
         # 2. 任务状态
@@ -121,7 +138,7 @@ def main():
         s, body = get("/api/config")
         assert s == 200, f"GET /api/config failed: {s}"
         cfg = json.loads(body)
-        for k in ("TASK_MODE", "WRITE_BACK_VIA", "BASE_IP", "OPCUA_URL"):
+        for k in ("TASK_MODE", "WRITE_BACK_VIA", "BASE_IP", "OPCUA_URL", "RTDB_REPLAY_BATCH_SIZE"):
             assert k in cfg, f"配置缺字段 {k}"
         print(f"[OK] 6. /api/config 含 TASK_MODE={cfg['TASK_MODE']}, WRITE_BACK_VIA={cfg['WRITE_BACK_VIA']}")
 
@@ -138,6 +155,24 @@ def main():
         assert s == 400, f"非法 POLL_INTERVAL 应返回 400, got {s}"
         print(f"[OK] 8. 非法 POLL_INTERVAL=99999 被拒绝 (HTTP {s})")
 
+        # 9. 开放连接信息、运行模式与回放批次配置
+        updates = {
+            "BASE_IP": "http://127.0.0.1:6543",
+            "OPCUA_URL": "opc.tcp://127.0.0.1:6810",
+            "TASK_MODE": "multi",
+            "WRITE_BACK_VIA": "rtdb",
+            "RTDB_REPLAY_BATCH_SIZE": 200,
+        }
+        s, body = post_json("/api/config", updates)
+        assert s == 200, f"开放配置保存失败: {s}"
+        cfg3 = json.loads(body)
+        for k, v in updates.items():
+            assert cfg3[k] == v, f"{k} 未保存，got {cfg3.get(k)!r}"
+        assert cfg3["restart_required"] is True, "连接/运行配置保存后应提示需要重启"
+        assert sorted(cfg3["restart_fields"]) == ["BASE_IP", "OPCUA_URL", "TASK_MODE", "WRITE_BACK_VIA"]
+        assert "RTDB_REPLAY_BATCH_SIZE" in cfg3["hot_reload_fields"], "热更新字段应在响应中说明"
+        print("[OK] 9. 连接信息、运行模式与回放批次配置可保存并提示重启")
+
         print("\n========== 所有测试通过 ==========")
     except AssertionError as e:
         print(f"\n[FAIL] {e}")
@@ -147,6 +182,10 @@ def main():
         sys.exit(1)
     finally:
         server.stop()
+        try:
+            os.remove(TEST_RUNTIME_CONFIG_FILE)
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":

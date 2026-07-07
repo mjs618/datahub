@@ -76,16 +76,23 @@ class RTDBClient:
                 result["message"] = body.get("message", "")
                 result["results"] = body.get("data")
 
-                if code == 0:
+                item_results = result["results"]
+                item_success = (
+                    item_results is None
+                    or all(x == 0 for x in item_results)
+                )
+
+                if code == 0 and item_success:
                     result["success"] = True
                     self.logger.info(f"RTDB write successful (attempt {attempt})")
                     return result
 
                 # 业务失败，重试
                 self.logger.warning(
-                    f"RTDB write business failure (code={code}): {result['message']}"
+                    f"RTDB write business failure "
+                    f"(code={code}, results={item_results}): {result['message']}"
                 )
-                last_err = f"code={code}, message={result['message']}"
+                last_err = f"code={code}, results={item_results}, message={result['message']}"
 
             except requests.exceptions.RequestException as e:
                 self.logger.warning(f"RTDB write request error (attempt {attempt}): {e}")

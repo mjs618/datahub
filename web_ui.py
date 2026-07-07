@@ -158,7 +158,13 @@ def _parse_multipart(body: bytes, content_type: str):
 # 校验失败时返回给前端的提示
 _TUNE_VALIDATION_HINT = (
     "调优参数需为数值：POLL_INTERVAL (整数, 1~3600 秒), "
-    "SETTLE_TIME (数值, 0~3600 秒), LOOKBACK_MINUTES (整数, 1~10080 分钟)"
+    "SETTLE_TIME (数值, 0~3600 秒), LOOKBACK_MINUTES (整数, 1~10080 分钟), "
+    "RTDB_REPLAY_BATCH_SIZE (整数, 1~10000 条)"
+)
+_CONNECTION_VALIDATION_HINT = (
+    "连接与运行配置需合法：BASE_IP 以 http:// 或 https:// 开头，"
+    "OPCUA_URL 以 opc.tcp:// 开头，TASK_MODE 为 multi/single，"
+    "WRITE_BACK_VIA 为 rtdb"
 )
 
 
@@ -183,6 +189,56 @@ def _validate_tuning(filtered):
             if not (1 <= v <= 10080):
                 return None
             filtered["LOOKBACK_MINUTES"] = v
+        if "RTDB_REPLAY_BATCH_SIZE" in filtered:
+            v = int(filtered["RTDB_REPLAY_BATCH_SIZE"])
+            if not (1 <= v <= 10000):
+                return None
+            filtered["RTDB_REPLAY_BATCH_SIZE"] = v
+    except (TypeError, ValueError):
+        return None
+    return True
+
+
+_RESTART_FIELDS = {"BASE_IP", "OPCUA_URL", "TASK_MODE", "WRITE_BACK_VIA"}
+_HOT_RELOAD_FIELDS = {
+    "TRIG_NODE_ID", "TRIG_HISTORY_ID", "WATCH_LIST", "NODE_MAPPING",
+    "POLL_INTERVAL", "SETTLE_TIME", "LOOKBACK_MINUTES", "RTDB_REPLAY_BATCH_SIZE",
+}
+
+
+def _with_config_effects(snapshot, changed_fields):
+    restart_fields = sorted(k for k in changed_fields if k in _RESTART_FIELDS)
+    hot_reload_fields = sorted(k for k in changed_fields if k in _HOT_RELOAD_FIELDS)
+    out = dict(snapshot)
+    out["restart_required"] = bool(restart_fields)
+    out["restart_fields"] = restart_fields
+    out["hot_reload_fields"] = hot_reload_fields
+    return out
+
+
+def _validate_connection_runtime(filtered):
+    """校验连接信息与启动级运行配置（就地规整字符串）。"""
+    try:
+        if "BASE_IP" in filtered:
+            v = str(filtered["BASE_IP"]).strip().rstrip("/")
+            if not (v.startswith("http://") or v.startswith("https://")):
+                return None
+            filtered["BASE_IP"] = v
+        if "OPCUA_URL" in filtered:
+            v = str(filtered["OPCUA_URL"]).strip()
+            if not v.startswith("opc.tcp://"):
+                return None
+            filtered["OPCUA_URL"] = v
+        if "TASK_MODE" in filtered:
+            v = str(filtered["TASK_MODE"]).strip().lower()
+            if v not in ("multi", "single"):
+                return None
+            filtered["TASK_MODE"] = v
+        if "WRITE_BACK_VIA" in filtered:
+            v = str(filtered["WRITE_BACK_VIA"]).strip().lower()
+            if v != "rtdb":
+                return None
+            filtered["WRITE_BACK_VIA"] = v
     except (TypeError, ValueError):
         return None
     return True
@@ -411,16 +467,19 @@ HTML_PAGE = """<!DOCTYPE html>
 
   <!-- 配置 Tab -->
   <div id="tab-config" class="panel">
-    <div class="panel-title">触发配置</div>
-    <div class="field">
-      <label>触发节点 ID (TRIG_NODE_ID)</label>
-      <input type="text" id="cfg-trig-node-id">
-      <div class="hint">OPC UA 节点 ID，如 ns=2;s=Trigger</div>
+    <div class="panel-title">单触发模式配置（仅 TASK_MODE=single 使用）</div>
+    <div class="hint" style="margin-bottom:12px;">
+      当前默认 multi 模式多任务触发点来自任务管理中的 AC_* 节点；下面 TRIG_* 字段只用于旧版 single 单触发同步流程。
     </div>
     <div class="field">
-      <label>触发历史点 ID (TRIG_HISTORY_ID)</label>
+      <label>单触发 OPC UA 节点 ID (TRIG_NODE_ID)</label>
+      <input type="text" id="cfg-trig-node-id">
+      <div class="hint">single 模式下主循环监听的 OPC UA 节点 ID，如 ns=2;s=Trigger；multi 模式不读取该字段。</div>
+    </div>
+    <div class="field">
+      <label>单触发历史点 ID (TRIG_HISTORY_ID)</label>
       <input type="text" id="cfg-trig-history-id">
-      <div class="hint">历史库点 ID，如 10001:ICSSYS.Trigger</div>
+      <div class="hint">single 模式下用于从历史库回查触发脉冲区间的历史点 ID，如 10001:ICSSYS.Trigger；multi 模式不读取该字段。</div>
     </div>
     <div class="field">
       <label>监听列表 (WATCH_LIST)</label>
@@ -451,31 +510,42 @@ HTML_PAGE = """<!DOCTYPE html>
         <input type="number" id="cfg-lookback-minutes" min="1" max="10080" step="1">
         <div class="hint">查询脉冲区间时向前回溯的分钟数，1~10080</div>
       </div>
+      <div class="field">
+        <label>RTDB 回放批次 RTDB_REPLAY_BATCH_SIZE (条)</label>
+        <input type="number" id="cfg-rtdb-replay-batch-size" min="1" max="10000" step="1">
+        <div class="hint">每次实时库写值接口最多提交的点数，1~10000</div>
+      </div>
     </div>
 
-    <div class="panel-title" style="margin-top:24px;">连接信息（只读）</div>
+    <div class="panel-title" style="margin-top:24px;">连接与运行配置</div>
+    <div class="hint" style="margin-bottom:12px;">保存后写入运行时配置文件；连接地址、运行模式、回写通道需要重启服务后完整生效。</div>
     <div class="field-row">
       <div class="field">
         <label>BASE_IP</label>
-        <input type="text" id="cfg-base-ip" class="readonly-input" readonly>
-        <div class="hint">历史库 / 实时库服务地址，通过环境变量配置</div>
+        <input type="text" id="cfg-base-ip">
+        <div class="hint">历史库 / 实时库服务地址，如 http://192.168.1.35:6543</div>
       </div>
       <div class="field">
         <label>OPCUA_URL</label>
-        <input type="text" id="cfg-opcua-url" class="readonly-input" readonly>
-        <div class="hint">OPC UA 服务地址，通过环境变量配置</div>
+        <input type="text" id="cfg-opcua-url">
+        <div class="hint">OPC UA 服务地址，如 opc.tcp://192.168.1.35:6810</div>
       </div>
     </div>
     <div class="field-row">
       <div class="field">
         <label>TASK_MODE（运行模式）</label>
-        <input type="text" id="cfg-task-mode" class="readonly-input" readonly>
-        <div class="hint">multi=多任务轮询 / single=单触发边沿；通过环境变量配置</div>
+        <select id="cfg-task-mode" style="width:100%;padding:8px 10px;border:1px solid #dcdfe6;border-radius:4px;font-size:13px;">
+          <option value="multi">multi - 多任务轮询</option>
+          <option value="single">single - 单触发边沿</option>
+        </select>
+        <div class="hint">multi=12 任务轮询 / single=旧版单触发边沿；重启后完整生效</div>
       </div>
       <div class="field">
         <label>WRITE_BACK_VIA（回写通道）</label>
-        <input type="text" id="cfg-write-back-via" class="readonly-input" readonly>
-        <div class="hint">opcua=通过 OPC UA 写回 / rtdb=通过实时库写值接口；通过环境变量配置</div>
+        <select id="cfg-write-back-via" style="width:100%;padding:8px 10px;border:1px solid #dcdfe6;border-radius:4px;font-size:13px;">
+          <option value="rtdb">rtdb - 实时库接口回放</option>
+        </select>
+        <div class="hint">多任务结果通过实时库写值接口回放；FC 反馈点仍通过 OPC UA 写回</div>
       </div>
     </div>
 
@@ -630,10 +700,11 @@ async function loadConfig() {
     $('cfg-poll-interval').value = cfg.POLL_INTERVAL != null ? cfg.POLL_INTERVAL : '';
     $('cfg-settle-time').value = cfg.SETTLE_TIME != null ? cfg.SETTLE_TIME : '';
     $('cfg-lookback-minutes').value = cfg.LOOKBACK_MINUTES != null ? cfg.LOOKBACK_MINUTES : '';
+    $('cfg-rtdb-replay-batch-size').value = cfg.RTDB_REPLAY_BATCH_SIZE != null ? cfg.RTDB_REPLAY_BATCH_SIZE : '';
     $('cfg-base-ip').value = cfg.BASE_IP || '';
     $('cfg-opcua-url').value = cfg.OPCUA_URL || '';
-    $('cfg-task-mode').value = cfg.TASK_MODE || '—';
-    $('cfg-write-back-via').value = cfg.WRITE_BACK_VIA || '—';
+    $('cfg-task-mode').value = cfg.TASK_MODE || 'multi';
+    $('cfg-write-back-via').value = cfg.WRITE_BACK_VIA || 'rtdb';
     // 同步 Tab 模式提示
     applySyncModeHint(cfg.TASK_MODE);
   } catch (e) {
@@ -662,6 +733,11 @@ function resetConfigForm() {
   $('cfg-poll-interval').value = cfg.POLL_INTERVAL != null ? cfg.POLL_INTERVAL : '';
   $('cfg-settle-time').value = cfg.SETTLE_TIME != null ? cfg.SETTLE_TIME : '';
   $('cfg-lookback-minutes').value = cfg.LOOKBACK_MINUTES != null ? cfg.LOOKBACK_MINUTES : '';
+  $('cfg-rtdb-replay-batch-size').value = cfg.RTDB_REPLAY_BATCH_SIZE != null ? cfg.RTDB_REPLAY_BATCH_SIZE : '';
+  $('cfg-base-ip').value = cfg.BASE_IP || '';
+  $('cfg-opcua-url').value = cfg.OPCUA_URL || '';
+  $('cfg-task-mode').value = cfg.TASK_MODE || 'multi';
+  $('cfg-write-back-via').value = cfg.WRITE_BACK_VIA || 'rtdb';
   showMsg('cfg-msg', '已恢复到当前保存的配置', true);
   toast('已放弃本次修改', 'info');
 }
@@ -708,6 +784,11 @@ async function saveConfig() {
     POLL_INTERVAL: parseInt($('cfg-poll-interval').value, 10),
     SETTLE_TIME: parseFloat($('cfg-settle-time').value),
     LOOKBACK_MINUTES: parseInt($('cfg-lookback-minutes').value, 10),
+    RTDB_REPLAY_BATCH_SIZE: parseInt($('cfg-rtdb-replay-batch-size').value, 10),
+    BASE_IP: $('cfg-base-ip').value.trim(),
+    OPCUA_URL: $('cfg-opcua-url').value.trim(),
+    TASK_MODE: $('cfg-task-mode').value,
+    WRITE_BACK_VIA: $('cfg-write-back-via').value,
   };
   setLoading('btn-save-config', true, '保存中...');
   try {
@@ -717,9 +798,15 @@ async function saveConfig() {
       body: JSON.stringify(payload)
     });
     if (!res.ok) throw await apiError(res);
-    await res.json();
-    showMsg('cfg-msg', '保存成功', true);
-    toast('配置已保存。调优参数下个周期 / 重启后生效', 'ok');
+    const saved = await res.json();
+    if (saved.restart_required) {
+      const fields = (saved.restart_fields || []).join(', ');
+      showMsg('cfg-msg', '保存成功；以下配置需重启服务后完整生效：' + fields, true);
+      toast('配置已保存，连接/运行配置需重启服务后完整生效', 'ok');
+    } else {
+      showMsg('cfg-msg', '保存成功', true);
+      toast('配置已保存，运行时配置已刷新', 'ok');
+    }
     await _snapshotConfig();
   } catch (e) {
     showMsg('cfg-msg', '保存失败', false);
@@ -942,6 +1029,9 @@ function renderTasks(tasks) {
     } else {
       statusBadge = '<span class="badge-dot" style="background:#c0c4cc;"></span>空闲';
     }
+    const stage = t.current_stage && t.current_stage !== 'idle'
+      ? '<div style="font-size:11px;color:#909399;margin-top:3px;">阶段：' + esc(t.current_stage) + '</div>'
+      : '';
     const acPrev = t.ac_prev === true ? '1' : t.ac_prev === false ? '0' : '—';
     let resultCell = '—';
     if (lr.status) {
@@ -957,7 +1047,7 @@ function renderTasks(tasks) {
       + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + esc(t.source) + '</td>'
       + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + esc(t.desc) + '</td>'
       + '<td style="padding:8px;border-bottom:1px solid #ebeef5;font-family:Consolas,monospace;font-size:11px;color:#606266;">' + esc(t.ac_node) + '</td>'
-      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + statusBadge + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + statusBadge + stage + '</td>'
       + '<td style="padding:8px;border-bottom:1px solid #ebeef5;font-family:Consolas,monospace;">' + acPrev + '</td>'
       + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + resultCell + '</td>'
       + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">'
@@ -1388,6 +1478,8 @@ class WebUIServer:
                     allowed = {
                         "TRIG_NODE_ID", "TRIG_HISTORY_ID", "WATCH_LIST", "NODE_MAPPING",
                         "POLL_INTERVAL", "SETTLE_TIME", "LOOKBACK_MINUTES",
+                        "RTDB_REPLAY_BATCH_SIZE",
+                        "BASE_IP", "OPCUA_URL", "TASK_MODE", "WRITE_BACK_VIA",
                     }
                     filtered = {k: v for k, v in updates.items() if k in allowed}
                     if not filtered:
@@ -1398,8 +1490,16 @@ class WebUIServer:
                     if tuned is None:
                         self._send_json(400, {"error": "invalid tuning", "detail": _TUNE_VALIDATION_HINT})
                         return
+                    conn = _validate_connection_runtime(filtered)
+                    if conn is None:
+                        self._send_json(400, {"error": "invalid connection", "detail": _CONNECTION_VALIDATION_HINT})
+                        return
+                    changed_fields = set(filtered.keys())
                     save_runtime_config(filtered)
-                    self._send_json(200, get_runtime_config_snapshot())
+                    self._send_json(
+                        200,
+                        _with_config_effects(get_runtime_config_snapshot(), changed_fields),
+                    )
                 except json.JSONDecodeError as e:
                     self._send_json(400, {"error": "invalid json", "detail": str(e)})
                 except Exception as e:

@@ -50,6 +50,16 @@ def _assemble_time(comp_values, components):
     return f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:{s:02d}"
 
 
+def _rtdb_node_id(node_id):
+    """将 OPC UA NodeId 形式的目标点转换为 RTDB 写值接口使用的测点名。"""
+    if not node_id:
+        return node_id
+    marker = ";s="
+    if marker in node_id:
+        return node_id.split(marker, 1)[1]
+    return node_id
+
+
 class DataHubService:
     def __init__(self):
         self.auth = AuthClient(
@@ -99,6 +109,7 @@ class DataHubService:
                 "task": t,
                 "ac_prev": None,        # None=未知，True/False=上次读到的 AC 值
                 "processing": False,    # 防重入标志
+                "current_stage": "idle",
                 "last_result": None,    # {"status","detail","timestamp"}
             }
         # Web UI 手动触发指定任务的请求队列：{task_id: True}
@@ -414,19 +425,32 @@ class DataHubService:
             logger.warning(f"Task {task_id}: already processing, skip this trigger")
             return
         st["processing"] = True
+        self._set_task_stage(task_id, "queued")
         try:
-            await self._handle_task(st["task"])
+            success, detail, stage = await self._handle_task(st["task"])
             st["last_result"] = {
-                "status": "completed", "detail": "", "timestamp": time.time(),
+                "status": "completed" if success else "failed",
+                "detail": detail,
+                "stage": stage,
+                "timestamp": time.time(),
             }
         except Exception as e:
             logger.exception(f"Task {task_id} failed with exception: {e}")
             st["last_result"] = {
-                "status": "failed", "detail": str(e), "timestamp": time.time(),
+                "status": "failed",
+                "detail": str(e),
+                "stage": st.get("current_stage", "exception"),
+                "timestamp": time.time(),
             }
         finally:
             st["processing"] = False
+            self._set_task_stage(task_id, "idle")
             logger.info(f"===== Task {task_id} cycle finished =====")
+
+    def _set_task_stage(self, task_id, stage):
+        st = self._task_state.get(task_id)
+        if st is not None:
+            st["current_stage"] = stage
 
     async def _handle_task(self, task):
         """
@@ -435,26 +459,29 @@ class DataHubService:
           2. 沉淀等待历史落库
           3. 读 12 个时间分量，拼成开始/结束时间
           4. 调历史 API 拉数据
-          5. 取每点最后有效值，回写到目标点
+          5. 将区间内所有历史值按时间顺序通过 RTDB 接口回写到目标点
           6. 成功后置 FC=1
         """
         tid = task["id"]
         logger.info(f"Task {tid}: ----- sync started -----")
+        self._set_task_stage(tid, "token")
 
         # 0. token
         if not await self._ensure_token():
             logger.warning(f"Task {tid}: no valid token, abort")
             self.metrics.mark_sync(False, "no valid token")
-            return
+            return False, "no valid token", "token"
 
         # 1. 沉淀
+        self._set_task_stage(tid, "settle")
         logger.info(f"Task {tid}: settling {config.SETTLE_TIME}s for history ingestion...")
         await self._sleep_or_stop(config.SETTLE_TIME)
         if self._stop_event.is_set():
             logger.info(f"Task {tid}: stop during settle, abort")
-            return
+            return False, "stopped during settle", "settle"
 
         # 2. 读时间分量
+        self._set_task_stage(tid, "read_time")
         start_components = task["start_components"]
         end_components = task["end_components"]
         all_comp_nodes = list(start_components.values()) + list(end_components.values())
@@ -469,77 +496,99 @@ class DataHubService:
                 f"(start_str={start_str!r}, end_str={end_str!r}, raw={comp_values}), abort"
             )
             self.metrics.mark_sync(False, "bad time components")
-            return
+            return False, "bad time components", "read_time"
         logger.info(f"Task {tid}: time range start={start_str} end={end_str}")
 
         # 3. 拉历史数据
+        self._set_task_stage(tid, "history")
         history_ids = [p["history_id"] for p in task["points"]]
         logger.info(f"Task {tid}: fetching history for {history_ids}")
         history_data = self.history.get_history_data(start_str, end_str, history_ids)
         if not history_data:
             logger.warning(f"Task {tid}: no history data returned, abort")
             self.metrics.mark_sync(False, "empty history")
-            return
+            return False, "empty history", "history"
 
-        # 4. 取每点最后有效值，组装回写负载
-        #    以 history_id 为键便于匹配
-        last_by_id = {}
+        # 4. 展开每个历史点在区间内的所有有效值，按时间排序后用于回放。
+        self._set_task_stage(tid, "build_replay")
+        replay_items = []
+        point_by_history_id = {p["history_id"]: p for p in task["points"]}
+        point_order = {p["history_id"]: idx for idx, p in enumerate(task["points"])}
         for node_entry in history_data:
             nid = node_entry.get("nodeId")
+            point_cfg = point_by_history_id.get(nid)
+            if not point_cfg:
+                logger.warning(f"Task {tid}: unexpected history node {nid}, skipped")
+                continue
             points = node_entry.get("data", []) or []
             if not points:
                 continue
-            points_sorted = sorted(points, key=lambda p: p.get("t", 0))
-            last_val = points_sorted[-1].get("v")
-            if last_val is not None:
-                last_by_id[nid] = last_val
+            target_id = point_cfg.get("target_id") or _rtdb_node_id(point_cfg.get("target_node"))
+            for sample in points:
+                val = sample.get("v")
+                if val is None:
+                    continue
+                replay_items.append({
+                    "t": sample.get("t", 0),
+                    "order": point_order.get(nid, 0),
+                    "history_id": nid,
+                    "nodeId": target_id,
+                    "value": val,
+                })
 
-        write_payload = []  # [{"node": target_node, "value": v}] (opcua) 或 [{"nodeId":..,"value":..}] (rtdb)
+        replay_items.sort(key=lambda item: (item["t"], item["order"]))
+        write_payload = [
+            {"nodeId": item["nodeId"], "value": item["value"]}
+            for item in replay_items
+        ]
+        for item in replay_items:
+            logger.info(
+                f"Task {tid}: replay {item['history_id']} -> {item['nodeId']} "
+                f"= {item['value']!r} (t={item['t']})"
+            )
+
         for p in task["points"]:
             hid = p["history_id"]
-            tgt = p["target_node"]
-            val = last_by_id.get(hid)
-            if val is None:
-                logger.warning(f"Task {tid}: source {hid} has no valid last value, skip {tgt}")
+            if not any(item["history_id"] == hid for item in replay_items):
+                target_id = p.get("target_id") or _rtdb_node_id(p.get("target_node"))
+                logger.warning(f"Task {tid}: source {hid} has no valid values, skip {target_id}")
                 continue
-            if config.WRITE_BACK_VIA == "opcua":
-                write_payload.append({"node": tgt, "value": val, "history_id": hid})
-            else:
-                write_payload.append({"nodeId": tgt, "value": val, "history_id": hid})
-            logger.info(f"Task {tid}: {hid} -> {tgt} = {val!r}")
 
         if not write_payload:
             logger.warning(f"Task {tid}: no valid points to write, abort")
             self.metrics.mark_sync(False, "no valid points")
-            return
+            return False, "no valid points", "build_replay"
 
-        # 5. 回写
-        write_ok = False
-        if config.WRITE_BACK_VIA == "opcua":
-            ok_count = 0
-            for item in write_payload:
-                if await self.opcua.write_value(item["node"], item["value"]):
-                    ok_count += 1
-            write_ok = (ok_count == len(write_payload))
+        # 5. 通过实时库接口批量回写区间内所有值
+        self._set_task_stage(tid, "rtdb_replay")
+        batch_size = max(1, int(config.RTDB_REPLAY_BATCH_SIZE))
+        batches = [
+            write_payload[i:i + batch_size]
+            for i in range(0, len(write_payload), batch_size)
+        ]
+        write_ok = True
+        failed_message = ""
+        for idx, batch in enumerate(batches, start=1):
+            result = self.rtdb.write_realtime_data(batch)
+            batch_ok = bool(result.get("success"))
             logger.info(
-                f"Task {tid}: OPC UA write-back {ok_count}/{len(write_payload)} "
-                f"{'SUCCESS' if write_ok else 'PARTIAL/FAILED'}"
+                f"Task {tid}: RTDB replay batch {idx}/{len(batches)} "
+                f"{'SUCCESS' if batch_ok else 'FAILED'} "
+                f"(count={len(batch)}, code={result.get('code')}, "
+                f"message={result.get('message')})"
             )
-        else:
-            rtdb_payload = [{"nodeId": it["nodeId"], "value": it["value"]} for it in write_payload]
-            result = self.rtdb.write_realtime_data(rtdb_payload)
-            write_ok = bool(result.get("success"))
-            logger.info(
-                f"Task {tid}: RTDB write-back {'SUCCESS' if write_ok else 'FAILED'} "
-                f"(code={result.get('code')}, message={result.get('message')})"
-            )
+            if not batch_ok:
+                write_ok = False
+                failed_message = result.get("message") or "write-back failed"
+                break
 
         if not write_ok:
-            self.metrics.mark_sync(False, "write-back failed")
+            self.metrics.mark_sync(False, failed_message or "write-back failed")
             logger.error(f"Task {tid}: write-back failed, FC will NOT be set")
-            return
+            return False, failed_message or "write-back failed", "rtdb_replay"
 
         # 6. 置 FC=1（仅在回写全部成功后）
+        self._set_task_stage(tid, "fc_feedback")
         fc_node = task["fc_node"]
         fc_ok = await self.opcua.write_value(fc_node, True)
         if fc_ok:
@@ -548,9 +597,11 @@ class DataHubService:
         else:
             logger.error(f"Task {tid}: write-back ok but FC=1 FAILED ({fc_node})")
             self.metrics.mark_sync(False, "FC write failed")
-            return
+            return False, "FC write failed", "fc_feedback"
 
+        self._set_task_stage(tid, "completed")
         logger.info(f"Task {tid}: ----- sync completed SUCCESS -----")
+        return True, "ok", "completed"
 
     # ---------- Web UI 任务回调 ----------
 
@@ -581,6 +632,7 @@ class DataHubService:
                 "ac_node": t["ac_node"],
                 "fc_node": t["fc_node"],
                 "processing": st.get("processing", False),
+                "current_stage": st.get("current_stage", "idle"),
                 "ac_prev": st.get("ac_prev"),
                 "last_result": st.get("last_result"),
             })
