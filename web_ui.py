@@ -297,6 +297,7 @@ HTML_PAGE = """<!DOCTYPE html>
 </header>
 <nav>
   <button class="tab-btn active" data-tab="overview">概览</button>
+  <button class="tab-btn" data-tab="tasks">任务管理</button>
   <button class="tab-btn" data-tab="config">配置</button>
   <button class="tab-btn" data-tab="nodes">节点浏览</button>
   <button class="tab-btn" data-tab="csv">CSV 导入</button>
@@ -367,11 +368,45 @@ HTML_PAGE = """<!DOCTYPE html>
 
     <div class="ov-section-title">运行信息</div>
     <div class="kv-list">
+      <span class="k">运行模式</span><span class="v" id="ov-task-mode">—</span>
+      <span class="k">回写通道</span><span class="v" id="ov-write-back-via">—</span>
       <span class="k">运行时长</span><span class="v" id="ov-uptime">—</span>
       <span class="k">启动时间</span><span class="v" id="ov-started">—</span>
       <span class="k">手动同步</span><span class="v" id="ov-manual">—</span>
       <span class="k">轮询间隔</span><span class="v" id="ov-poll">—</span>
     </div>
+  </div>
+
+  <!-- 任务管理 Tab -->
+  <div id="tab-tasks" class="panel">
+    <div class="panel-title">任务列表
+      <button class="btn btn-sm" style="margin-left:12px;" onclick="loadTasks()">刷新</button>
+      <span style="margin-left:8px;font-size:12px;color:#909399;" id="tasks-auto-hint"></span>
+    </div>
+    <div class="hint" style="margin-bottom:12px;">
+      点击「触发」可手动派发指定任务（不影响边沿自动触发）。处理中状态的任务无法重复触发。
+    </div>
+    <div style="overflow-x:auto;">
+      <table id="tasks-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="background:#f5f7fa;color:#606266;text-align:left;">
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">ID</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">模块</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">数据源</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">描述</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">AC 节点</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">状态</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">上次 AC</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">最近结果</th>
+            <th style="padding:8px;border-bottom:1px solid #e0e0e0;">操作</th>
+          </tr>
+        </thead>
+        <tbody id="tasks-tbody">
+          <tr><td colspan="9" style="padding:16px;color:#909399;text-align:center;">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre id="tasks-raw" style="margin-top:16px;"></pre>
   </div>
 
   <!-- 配置 Tab -->
@@ -431,13 +466,31 @@ HTML_PAGE = """<!DOCTYPE html>
         <div class="hint">OPC UA 服务地址，通过环境变量配置</div>
       </div>
     </div>
+    <div class="field-row">
+      <div class="field">
+        <label>TASK_MODE（运行模式）</label>
+        <input type="text" id="cfg-task-mode" class="readonly-input" readonly>
+        <div class="hint">multi=多任务轮询 / single=单触发边沿；通过环境变量配置</div>
+      </div>
+      <div class="field">
+        <label>WRITE_BACK_VIA（回写通道）</label>
+        <input type="text" id="cfg-write-back-via" class="readonly-input" readonly>
+        <div class="hint">opcua=通过 OPC UA 写回 / rtdb=通过实时库写值接口；通过环境变量配置</div>
+      </div>
+    </div>
 
     <button class="btn" id="btn-save-config" onclick="saveConfig()">保存配置</button>
+    <button class="btn btn-warn" id="btn-reset-config" onclick="resetConfigForm()">放弃修改</button>
     <span id="cfg-msg" style="margin-left:12px;"></span>
   </div>
 
   <!-- 节点浏览 Tab -->
   <div id="tab-nodes" class="panel">
+    <div class="panel-title">
+      OPC UA 节点浏览
+      <button class="btn btn-sm" style="margin-left:12px;" id="btn-refresh-nodes" onclick="loadTopNodes()">刷新根节点</button>
+      <span style="margin-left:8px;font-size:12px;color:#909399;" id="nodes-hint"></span>
+    </div>
     <div class="clearfix">
       <div id="tree-container">
         <ul class="tree root" id="tree-root"></ul>
@@ -461,6 +514,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="hint">CSV 格式：每行两列 history_id,rtdb_id（首行可为表头）。history_id 加到 WATCH_LIST，同时建立 NODE_MAPPING。</div>
     </div>
     <button class="btn" id="btn-import-csv" onclick="importCsv()">导入</button>
+    <button class="btn btn-danger" id="btn-clear-csv" onclick="clearWatchList()">清空监听列表与映射</button>
     <div style="margin-top:16px;">
       <pre id="csv-result">导入结果将显示在这里</pre>
     </div>
@@ -469,6 +523,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <!-- 同步 Tab -->
   <div id="tab-sync" class="panel">
     <div class="panel-title">手动触发同步</div>
+    <div id="sync-mode-hint" style="display:none;padding:10px 14px;background:#fdf6ec;border:1px solid #f5dab1;border-radius:4px;color:#e6a23c;margin-bottom:16px;font-size:13px;"></div>
     <div class="field">
       <button class="btn" id="btn-trigger-sync" onclick="triggerSync()">立即同步</button>
       <span id="sync-trigger-msg" style="margin-left:12px;"></span>
@@ -577,8 +632,58 @@ async function loadConfig() {
     $('cfg-lookback-minutes').value = cfg.LOOKBACK_MINUTES != null ? cfg.LOOKBACK_MINUTES : '';
     $('cfg-base-ip').value = cfg.BASE_IP || '';
     $('cfg-opcua-url').value = cfg.OPCUA_URL || '';
+    $('cfg-task-mode').value = cfg.TASK_MODE || '—';
+    $('cfg-write-back-via').value = cfg.WRITE_BACK_VIA || '—';
+    // 同步 Tab 模式提示
+    applySyncModeHint(cfg.TASK_MODE);
   } catch (e) {
     toast('加载配置失败: ' + e.message, 'err');
+  }
+}
+
+// 保留最近一次加载的配置快照，供「放弃修改」使用
+let _lastLoadedConfig = null;
+async function _snapshotConfig() {
+  try {
+    const res = await fetch('/api/config');
+    if (!res.ok) return;
+    _lastLoadedConfig = await res.json();
+  } catch (e) { /* 忽略 */ }
+}
+
+function resetConfigForm() {
+  if (!_lastLoadedConfig) { toast('尚未加载配置，无法放弃修改', 'info'); return; }
+  const cfg = _lastLoadedConfig;
+  $('cfg-trig-node-id').value = cfg.TRIG_NODE_ID || '';
+  $('cfg-trig-history-id').value = cfg.TRIG_HISTORY_ID || '';
+  $('cfg-watch-list').value = (cfg.WATCH_LIST || []).join('\\n');
+  const mapping = cfg.NODE_MAPPING || {};
+  $('cfg-node-mapping').value = Object.keys(mapping).map(k => k + '|' + mapping[k]).join('\\n');
+  $('cfg-poll-interval').value = cfg.POLL_INTERVAL != null ? cfg.POLL_INTERVAL : '';
+  $('cfg-settle-time').value = cfg.SETTLE_TIME != null ? cfg.SETTLE_TIME : '';
+  $('cfg-lookback-minutes').value = cfg.LOOKBACK_MINUTES != null ? cfg.LOOKBACK_MINUTES : '';
+  showMsg('cfg-msg', '已恢复到当前保存的配置', true);
+  toast('已放弃本次修改', 'info');
+}
+
+// multi 模式下，/api/trigger_sync 永远不会被消费，提示用户改用任务管理
+function applySyncModeHint(taskMode) {
+  const hint = $('sync-mode-hint');
+  const btn = $('btn-trigger-sync');
+  if (!hint || !btn) return;
+  if (taskMode === 'multi') {
+    hint.style.display = 'block';
+    hint.innerHTML = '当前为 <b>multi</b> 多任务模式，「立即同步」按钮不会被主循环消费（会永久 pending）。如需触发单个任务，请前往 <a href="#tasks" id="goto-tasks-link" style="color:#409eff;">任务管理</a> Tab。';
+    var link = hint.querySelector('#goto-tasks-link');
+    if (link) link.addEventListener('click', function(e) { e.preventDefault(); switchTab('tasks'); });
+    btn.disabled = true;
+    btn.classList.add('is-loading');
+    btn.title = 'multi 模式下不可用';
+  } else {
+    hint.style.display = 'none';
+    btn.disabled = false;
+    btn.classList.remove('is-loading');
+    btn.title = '';
   }
 }
 
@@ -615,6 +720,7 @@ async function saveConfig() {
     await res.json();
     showMsg('cfg-msg', '保存成功', true);
     toast('配置已保存。调优参数下个周期 / 重启后生效', 'ok');
+    await _snapshotConfig();
   } catch (e) {
     showMsg('cfg-msg', '保存失败', false);
     toast('保存失败: ' + e.message, 'err');
@@ -685,11 +791,15 @@ function renderTree(nodes, container) {
 }
 
 async function loadTopNodes() {
+  const hint = $('nodes-hint');
+  if (hint) hint.textContent = '加载中...';
   try {
     const nodes = await browseNodes(null);
     renderTree(nodes, $('tree-root'));
+    if (hint) hint.textContent = '已加载 ' + nodes.length + ' 个根节点';
   } catch (e) {
     $('tree-root').innerHTML = '<li style="color:#f56c6c;">加载失败: ' + esc(e.message) + '</li>';
+    if (hint) hint.textContent = '加载失败';
   }
 }
 
@@ -778,6 +888,132 @@ async function importCsv() {
   }
 }
 
+async function clearWatchList() {
+  if (!confirm('确认清空 WATCH_LIST 与 NODE_MAPPING？此操作不可撤销。')) return;
+  setLoading('btn-clear-csv', true, '清空中...');
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ WATCH_LIST: [], NODE_MAPPING: {} })
+    });
+    if (!res.ok) throw await apiError(res);
+    $('csv-result').textContent = '已清空 WATCH_LIST 与 NODE_MAPPING';
+    toast('已清空', 'ok');
+    loadConfig();
+  } catch (e) {
+    toast('清空失败: ' + e.message, 'err');
+  } finally {
+    setLoading('btn-clear-csv', false);
+  }
+}
+
+// ==================== 任务管理 Tab ====================
+let tasksTimer = null;
+
+async function loadTasks() {
+  try {
+    const res = await fetch('/api/tasks/status');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    renderTasks(data.tasks || []);
+    $('tasks-raw').textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    $('tasks-tbody').innerHTML = '<tr><td colspan="9" style="padding:16px;color:#f56c6c;text-align:center;">加载失败: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function renderTasks(tasks) {
+  const tbody = $('tasks-tbody');
+  if (!tasks.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="padding:16px;color:#909399;text-align:center;">无任务（TASK_MODE 可能不是 multi）</td></tr>';
+    return;
+  }
+  let html = '';
+  tasks.forEach(t => {
+    const lr = t.last_result || {};
+    let statusBadge;
+    if (t.processing) {
+      statusBadge = '<span class="badge-dot warn"></span>处理中';
+    } else if (lr.status === 'completed') {
+      statusBadge = '<span class="badge-dot ok"></span>已完成';
+    } else if (lr.status === 'failed') {
+      statusBadge = '<span class="badge-dot bad"></span>失败';
+    } else {
+      statusBadge = '<span class="badge-dot" style="background:#c0c4cc;"></span>空闲';
+    }
+    const acPrev = t.ac_prev === true ? '1' : t.ac_prev === false ? '0' : '—';
+    let resultCell = '—';
+    if (lr.status) {
+      const ts = lr.timestamp ? fmtTime(lr.timestamp) : '';
+      resultCell = '<div>' + esc(lr.status) + (lr.detail ? ' · ' + esc(lr.detail) : '') + '</div>'
+                 + '<div style="font-size:11px;color:#909399;">' + ts + '</div>';
+    }
+    const btnDisabled = t.processing ? ' disabled' : '';
+    const btnClass = 'btn btn-sm' + (t.processing ? ' is-loading' : '');
+    html += '<tr>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;font-family:Consolas,monospace;">' + esc(t.id) + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + esc(t.module) + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + esc(t.source) + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + esc(t.desc) + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;font-family:Consolas,monospace;font-size:11px;color:#606266;">' + esc(t.ac_node) + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + statusBadge + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;font-family:Consolas,monospace;">' + acPrev + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">' + resultCell + '</td>'
+      + '<td style="padding:8px;border-bottom:1px solid #ebeef5;">'
+      + '<button class="' + btnClass + '" onclick="triggerTask(\\'' + esc(t.id) + '\\')"' + btnDisabled + '>触发</button>'
+      + '</td>'
+      + '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+async function triggerTask(taskId) {
+  if (!confirm('确认手动触发任务 ' + taskId + '？')) return;
+  try {
+    const res = await fetch('/api/tasks/trigger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: taskId })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+    if (data.status === 'triggered') {
+      toast('任务 ' + taskId + ' 已触发', 'ok');
+      startTasksPolling();
+    } else {
+      toast('任务 ' + taskId + ' 触发返回: ' + (data.status || 'unknown'), 'info');
+    }
+  } catch (e) {
+    toast('触发失败: ' + e.message, 'err');
+  }
+}
+
+// 任务状态轮询：检测到所有任务处理中或刚刚触发后开启，最长 ~60s
+function startTasksPolling() {
+  if (tasksTimer) clearInterval(tasksTimer);
+  $('tasks-auto-hint').textContent = '自动刷新中...';
+  let rounds = 0;
+  tasksTimer = setInterval(async () => {
+    rounds++;
+    let anyProcessing = true;
+    try {
+      const res = await fetch('/api/tasks/status');
+      if (res.ok) {
+        const d = await res.json();
+        renderTasks(d.tasks || []);
+        $('tasks-raw').textContent = JSON.stringify(d, null, 2);
+        anyProcessing = (d.tasks || []).some(t => t.processing);
+      }
+    } catch (e) { /* 忽略单次失败 */ }
+    if (!anyProcessing || rounds > 30) {
+      clearInterval(tasksTimer);
+      tasksTimer = null;
+      $('tasks-auto-hint').textContent = '';
+    }
+  }, 2000);
+}
+
 // ==================== 同步 Tab ====================
 let syncPollTimer = null;
 
@@ -861,9 +1097,22 @@ async function refreshOverview() {
     m = mr; ts = tr; cfg = cr;
   } catch (e) { return; }
 
+  const taskMode = cfg ? cfg.TASK_MODE : null;
+  // 运行模式与回写通道
+  if (cfg) {
+    $('ov-task-mode').textContent = taskMode === 'multi' ? 'multi（多任务）' : (taskMode === 'single' ? 'single（单触发）' : (taskMode || '—'));
+    $('ov-write-back-via').textContent = cfg.WRITE_BACK_VIA || '—';
+  }
+
   if (ts) {
     const v = ts.trigger_value;
-    $('ov-trig-val').textContent = (v === true ? '1' : v === false ? '0' : '—');
+    // multi 模式下主循环不读 TRIG_NODE_ID，触发值永远是 None，显示提示而非 —
+    if (taskMode === 'multi') {
+      $('ov-trig-val').textContent = 'N/A';
+      $('ov-trig-val').title = 'multi 模式下不读取 TRIG_NODE_ID';
+    } else {
+      $('ov-trig-val').textContent = (v === true ? '1' : v === false ? '0' : '—');
+    }
     $('ov-opcua').innerHTML = badge(ts.opcua_connected, '已连接', '未连接');
     $('ov-opcua-sub').textContent = '';
   }
@@ -907,16 +1156,45 @@ async function refreshOverview() {
     $('ov-poll').textContent = cfg.POLL_INTERVAL + ' 秒';
   }
 
-  // 手动同步状态合并展示
-  try {
-    const sr = await fetch('/api/sync_status');
-    if (sr.ok) {
-      const sd = await sr.json();
-      $('ov-manual').innerHTML = sd.pending
-        ? '<span class="badge-dot warn"></span>进行中'
-        : (sd.last_result ? '<span class="badge-dot ok"></span>' + (sd.last_result.status === 'completed' ? '完成' : '失败') : '空闲');
-    }
-  } catch (e) { /* 忽略 */ }
+  // multi 模式下，"手动同步"卡片改为展示最近一次任务结果
+  if (taskMode === 'multi') {
+    try {
+      const tres = await fetch('/api/tasks/status');
+      if (tres.ok) {
+        const td = await tres.json();
+        const tasks = td.tasks || [];
+        const processing = tasks.some(t => t.processing);
+        if (processing) {
+          $('ov-manual').innerHTML = '<span class="badge-dot warn"></span>有任务处理中';
+        } else {
+          // 找最近一个有 last_result 的任务
+          let latest = null;
+          tasks.forEach(t => {
+            const lr = t.last_result;
+            if (lr && lr.timestamp && (!latest || lr.timestamp > latest.timestamp)) latest = lr;
+          });
+          if (latest) {
+            const ok = latest.status === 'completed';
+            $('ov-manual').innerHTML = '<span class="badge-dot ' + (ok ? 'ok' : 'bad') + '"></span>'
+              + (ok ? '最近任务完成' : '最近任务失败');
+          } else {
+            $('ov-manual').innerHTML = '<span class="badge-dot" style="background:#c0c4cc;"></span>无任务记录';
+          }
+        }
+      }
+    } catch (e) { /* 忽略 */ }
+  } else {
+    // single 模式：展示手动同步状态
+    try {
+      const sr = await fetch('/api/sync_status');
+      if (sr.ok) {
+        const sd = await sr.json();
+        $('ov-manual').innerHTML = sd.pending
+          ? '<span class="badge-dot warn"></span>进行中'
+          : (sd.last_result ? '<span class="badge-dot ok"></span>' + (sd.last_result.status === 'completed' ? '完成' : '失败') : '空闲');
+      }
+    } catch (e) { /* 忽略 */ }
+  }
 }
 
 function startOverviewRefresh() {
@@ -936,13 +1214,15 @@ document.addEventListener('visibilitychange', () => {
 
 // ==================== 初始化 ====================
 loadConfig();
+_snapshotConfig();
 loadTopNodes();
+loadTasks();
 initCsvDropzone();
 startOverviewRefresh();
 
 // 支持通过 URL hash 直接定位 Tab（如 #config / #sync），便于深链接与截图
 (function initHashTab() {
-  const valid = ['overview', 'config', 'nodes', 'csv', 'sync'];
+  const valid = ['overview', 'tasks', 'config', 'nodes', 'csv', 'sync'];
   const tab = (location.hash || '').replace('#', '');
   if (valid.indexOf(tab) >= 0) switchTab(tab);
 })();
