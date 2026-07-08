@@ -103,6 +103,14 @@ class Config:
     # OPC UA 重连设置
     OPCUA_RECONNECT_INTERVAL = float(os.getenv("OPCUA_RECONNECT_INTERVAL", "5"))
     OPCUA_MAX_RECONNECT_ATTEMPTS = int(os.getenv("OPCUA_MAX_RECONNECT_ATTEMPTS", "0"))  # 0 = 无限
+    # 指数退避因子与封顶间隔：delay = min(base * factor^(n-1), max)
+    OPCUA_BACKOFF_FACTOR = float(os.getenv("OPCUA_BACKOFF_FACTOR", "2"))
+    OPCUA_MAX_RECONNECT_INTERVAL = float(os.getenv("OPCUA_MAX_RECONNECT_INTERVAL", "300"))
+    # 连接 / 读写超时（秒），防止服务端无响应卡死
+    OPCUA_CONNECT_TIMEOUT = float(os.getenv("OPCUA_CONNECT_TIMEOUT", "10"))
+    OPCUA_REQUEST_TIMEOUT = float(os.getenv("OPCUA_REQUEST_TIMEOUT", "10"))
+    # 后台健康检查周期（秒），定期读取 ServerStatus 探测半开连接
+    OPCUA_HEALTH_CHECK_INTERVAL = float(os.getenv("OPCUA_HEALTH_CHECK_INTERVAL", "30"))
 
     # 历史数据分页大小（0 = 不分页）
     HISTORY_PAGE_SIZE = int(os.getenv("HISTORY_PAGE_SIZE", "0"))

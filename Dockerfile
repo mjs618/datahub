@@ -18,6 +18,16 @@ WORKDIR /app
 # Install curl for an alternative healthcheck option (kept minimal)
 # RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
+# 配置国内 Debian 镜像源（阿里云）以提高下载速度和成功率
+RUN sed -i 's|http://deb.debian.org|http://mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+
+# Install build dependencies for cffi (needed by asyncua)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libc6-dev \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the requirements file into the container at /app
 COPY requirements.txt .
 

@@ -1,0 +1,55 @@
+# Docker 构建上下文排除清单
+# 仅把运行时必需文件打进镜像，缩小上下文、加速构建、避免泄露开发脚本
+
+# Python 运行时产物
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 日志与运行时产物
+*.log
+output.log
+test_run.log
+
+# 持久化状态文件（容器内由 volume 管理，不应打进镜像）
+data_hub_state.json
+data_hub_write_cache.json
+/tmp/data_hub_*.json
+config_runtime.json
+
+# 测试 / 探测 / 扫描脚本（仅开发用，运行时不需要）
+test_*.py
+probe_*.py
+scan_*.py
+explore_*.py
+simulate_trigger.py
+
+# 文档（镜像内不需要）
+需求文档.md
+UAExpert_使用指南.md
+DEPLOY-ARM.md
+
+# 部署辅助目录（脚本本身不打进应用镜像）
+deploy/
+
+# 打包产物
+dist/
+
+# IDE / 操作系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 版本控制与本地记忆
+.git/
+.gitignore
+.workbuddy/

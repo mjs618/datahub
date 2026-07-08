@@ -1,0 +1,78 @@
+# data-hub.service
+# systemd 单元文件：方式C 裸机 Python 部署用，提供进程守护、开机自启、自动重启。
+#
+# 安装步骤（在 ARM 服务器上，以 root 或 sudo 执行）：
+#   1) 把本文件复制到 /etc/systemd/system/data-hub.service
+#   2) 按实际环境修改下方 Environment= 行（参考 docker-compose.yml）
+#   3) 确认 ExecStart 的 python3 路径与项目目录正确
+#   4) 启用并启动：
+#        sudo systemctl daemon-reload
+#        sudo systemctl enable data-hub
+#        sudo systemctl start data-hub
+#   5) 查看状态与日志：
+#        sudo systemctl status data-hub
+#        sudo journalctl -u data-hub -f
+#
+# 注意：STATE_FILE / WRITE_CACHE_FILE 指向 /var/lib/data-hub，需提前创建并设权限：
+#   sudo mkdir -p /var/lib/data-hub
+#   sudo chown -R datahub:datahub /var/lib/data-hub   # 若用专用用户跑
+
+[Unit]
+Description=Data Hub - OPC UA / History DB / RTDB integration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 运行用户：建议用专用账户，避免 root；如用 root 去掉下面两行
+# User=datahub
+# Group=datahub
+
+# 项目目录（按实际部署路径修改）
+WorkingDirectory=/opt/data-hub
+
+# Python 解释器：建议用虚拟环境，例如 /opt/data-hub/.venv/bin/python3
+ExecStart=/usr/bin/python3 main.py
+
+# 环境变量配置（按实际环境修改，参考 docker-compose.yml）
+Environment=BASE_IP=http://192.168.1.35:6543
+Environment=OPCUA_URL=opc.tcp://192.168.1.35:6810
+Environment=APP_CODE=data
+Environment=APP_SECRET=123456
+Environment=TRIG_NODE_ID=ns=2;s=Trigger
+Environment=TRIG_HISTORY_ID=10001:ICSSYS.Trigger
+Environment=POLL_INTERVAL=1
+Environment=LOOKBACK_MINUTES=10
+Environment=SETTLE_TIME=2
+Environment=HTTP_TIMEOUT=10
+Environment=HTTP_MAX_RETRIES=3
+Environment=HTTP_RETRY_BACKOFF=1.5
+Environment=OPCUA_RECONNECT_INTERVAL=5
+Environment=HISTORY_PAGE_SIZE=0
+Environment=ENABLE_WRITE_CACHE=true
+Environment=WRITE_CACHE_FILE=/var/lib/data-hub/data_hub_write_cache.json
+Environment=STATE_FILE=/var/lib/data-hub/data_hub_state.json
+Environment=ENABLE_DEDUP=true
+Environment=HEALTH_ENDPOINT_ENABLED=true
+Environment=HEALTH_ENDPOINT_PORT=8088
+Environment=HEALTH_STALE_THRESHOLD=60
+Environment=WEB_UI_PORT=8089
+Environment=TZ=Asia/Shanghai
+
+# 持久化目录可写
+ReadWritePaths=/var/lib/data-hub
+
+# 重启策略：异常退出 5 秒后重启，避免反复崩溃时刷屏
+Restart=on-failure
+RestartSec=5
+
+# 日志走 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=data-hub
+
+# 资源限制（按需调整）
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

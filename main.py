@@ -43,6 +43,10 @@ def _assemble_time(comp_values, components):
         logger.warning(f"_assemble_time: invalid component value ({e}), components={components}")
         return None
     y, mo, d, h, mi, s = nums
+    # 全 0 视为未写入有效时间，直接返回 None 避免查询空区间
+    if all(n == 0 for n in nums):
+        logger.warning(f"_assemble_time: all-zero time components, components={components}")
+        return None
     # 基本合法性校验（不抛异常，仅拦截明显非法值）
     if not (1970 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31
             and 0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59):
@@ -73,6 +77,11 @@ class DataHubService:
             config.OPCUA_URL,
             reconnect_interval=config.OPCUA_RECONNECT_INTERVAL,
             max_reconnect_attempts=config.OPCUA_MAX_RECONNECT_ATTEMPTS,
+            max_reconnect_interval=config.OPCUA_MAX_RECONNECT_INTERVAL,
+            backoff_factor=config.OPCUA_BACKOFF_FACTOR,
+            connect_timeout=config.OPCUA_CONNECT_TIMEOUT,
+            request_timeout=config.OPCUA_REQUEST_TIMEOUT,
+            health_check_interval=config.OPCUA_HEALTH_CHECK_INTERVAL,
         )
         self.history = None
         self.rtdb = None
@@ -125,10 +134,14 @@ class DataHubService:
             trigger_state_getter=self._get_trigger_state,
             task_trigger_callback=self.request_task_trigger,
             task_status_getter=self.get_tasks_status,
+            opcua_stats_getter=self.get_opcua_stats,
+            opcua_reconnect_callback=self.request_opcua_reconnect,
         )
 
         self._stop_event = asyncio.Event()
         self._loop = None
+        # OPC UA 连接状态日志节流：None=未记录过，True/False=上次记录的连接状态
+        self._last_opcua_log_state = None
 
     # ---------- 生命周期 ----------
 
@@ -163,8 +176,10 @@ class DataHubService:
             await self.opcua.connect()
             self.metrics.set_opcua_connected(self.opcua.connected)
         except Exception as e:
-            logger.error(f"Initial OPC UA connect failed: {e}, will retry in loop")
+            logger.error(f"Initial OPC UA connect failed: {e}, background reconnect will continue retrying")
             self.metrics.set_opcua_connected(False)
+            # 显式触发后台重连任务（非阻塞），避免等待下一个轮询周期
+            await self.opcua.ensure_connected()
 
         # 按运行模式进入对应主循环
         if config.TASK_MODE == "multi":
@@ -336,14 +351,24 @@ class DataHubService:
         logger.info("Main loop exited (stop event set)")
 
     async def _ensure_opcua_connected(self):
-        if not self.opcua.connected:
-            logger.info("OPC UA not connected, attempting ensure_connected()...")
-            try:
-                await self.opcua.ensure_connected()
-                logger.info(f"OPC UA ensure_connected returned, connected={self.opcua.connected}")
-            except Exception as e:
-                logger.warning(f"OPC UA reconnect attempt failed: {e}")
-        self.metrics.set_opcua_connected(self.opcua.connected)
+        """
+        确保 OPC UA 连接可用（非阻塞）。
+        - 已连接：立即返回
+        - 未连接：触发后台重连任务并立即返回，主循环不阻塞
+        日志仅在连接状态发生变化时打印，避免每秒刷屏。
+        """
+        connected = self.opcua.connected
+        if not connected:
+            # 触发后台重连（如未运行）
+            await self.opcua.ensure_connected()
+        # 状态变化时打印日志（节流）
+        if connected != self._last_opcua_log_state:
+            if connected:
+                logger.info("OPC UA connected")
+            else:
+                logger.warning("OPC UA not connected, background reconnect task will keep retrying")
+            self._last_opcua_log_state = connected
+        self.metrics.set_opcua_connected(connected)
 
     async def _sleep_or_stop(self, seconds):
         try:
@@ -637,6 +662,29 @@ class DataHubService:
                 "last_result": st.get("last_result"),
             })
         return {"tasks": out}
+
+    # ---------- Web UI OPC UA 连接管理回调 ----------
+
+    def get_opcua_stats(self):
+        """Web UI 调用：返回 OPC UA 连接状态统计快照。"""
+        return self.opcua.stats
+
+    def request_opcua_reconnect(self):
+        """
+        Web UI 调用：请求立即重连 OPC UA。
+        Web UI 运行在后台线程，需将协程提交到主事件循环。
+        返回 {"status": "submitted"} 表示已提交（实际结果异步完成）。
+        """
+        if self._loop is None:
+            return {"status": "error", "error": "event loop not ready"}
+        if self._stop_event.is_set():
+            return {"status": "error", "error": "service stopping"}
+        try:
+            asyncio.run_coroutine_threadsafe(self.opcua.reconnect_now(), self._loop)
+            return {"status": "submitted"}
+        except Exception as e:
+            logger.warning(f"Failed to submit OPC UA reconnect: {e}")
+            return {"status": "error", "error": str(e)}
 
     # ---------- 同步流程 ----------
 

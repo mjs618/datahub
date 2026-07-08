@@ -386,6 +386,25 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
+    <div class="ov-section-title">
+      OPC UA 连接详情
+      <button class="btn btn-sm btn-warn" id="btn-opcua-reconnect" style="margin-left:12px;" onclick="reconnectOpcua()">立即重连</button>
+      <span id="ov-opcua-reconnect-msg" style="margin-left:8px;font-size:12px;color:#909399;"></span>
+    </div>
+    <div class="kv-list">
+      <span class="k">服务地址</span><span class="v" id="ov-opcua-url">—</span>
+      <span class="k">连接时长</span><span class="v" id="ov-opcua-uptime">—</span>
+      <span class="k">断开时长</span><span class="v" id="ov-opcua-downtime">—</span>
+      <span class="k">上次断开</span><span class="v" id="ov-opcua-last-dc">—</span>
+      <span class="k">连接建立于</span><span class="v" id="ov-opcua-since">—</span>
+      <span class="k">当前重连尝试</span><span class="v" id="ov-opcua-attempts">—</span>
+      <span class="k">累计重连尝试</span><span class="v" id="ov-opcua-total-attempts">—</span>
+      <span class="k">成功重连次数</span><span class="v" id="ov-opcua-success">—</span>
+      <span class="k">非预期断开次数</span><span class="v" id="ov-opcua-unexpected">—</span>
+      <span class="k">重连任务</span><span class="v" id="ov-opcua-reconnect-task">—</span>
+      <span class="k">健康检查任务</span><span class="v" id="ov-opcua-health-task">—</span>
+    </div>
+
     <div class="ov-section-title">触发信号</div>
     <div class="ov-grid">
       <div class="ov-card">
@@ -1176,15 +1195,62 @@ async function loadSyncStatus() {
 // ==================== 概览 Tab（自动刷新） ====================
 let overviewTimer = null;
 
-async function refreshOverview() {
-  let m = null, ts = null, cfg = null;
+function renderOpcuaStats(s) {
+  if (!s) return;
+  const set = (id, val) => { const el = $(id); if (el) el.textContent = (val == null ? '—' : val); };
+  const setHtml = (id, html) => { const el = $(id); if (el) el.innerHTML = html; };
+  set('ov-opcua-url', s.url || '—');
+  set('ov-opcua-uptime', s.connected ? fmtUptime(s.uptime_seconds) : '—');
+  set('ov-opcua-downtime', s.connected ? '—' : fmtUptime(s.downtime_seconds));
+  set('ov-opcua-last-dc', s.last_disconnect_time ? fmtTime(s.last_disconnect_time) : '—');
+  set('ov-opcua-since', s.connected_since ? fmtTime(s.connected_since) : '—');
+  set('ov-opcua-attempts', s.reconnect_attempts_current != null ? s.reconnect_attempts_current : '—');
+  set('ov-opcua-total-attempts', s.total_reconnect_attempts != null ? s.total_reconnect_attempts : '—');
+  set('ov-opcua-success', s.successful_reconnects != null ? s.successful_reconnects : '—');
+  set('ov-opcua-unexpected', s.unexpected_disconnects != null ? s.unexpected_disconnects : '—');
+  const rt = s.reconnect_task_running;
+  setHtml('ov-opcua-reconnect-task', rt ? '<span class="badge-dot warn"></span>运行中' : '<span class="badge-dot" style="background:#c0c4cc;"></span>未运行');
+  const ht = s.health_check_task_running;
+  setHtml('ov-opcua-health-task', ht ? '<span class="badge-dot ok"></span>运行中' : '<span class="badge-dot" style="background:#c0c4cc;"></span>未运行');
+  const btn = $('btn-opcua-reconnect');
+  if (btn) btn.disabled = false;
+}
+
+async function reconnectOpcua() {
+  if (!confirm('确认立即重连 OPC UA？将取消当前后台重连并立即尝试一次。')) return;
+  setLoading('btn-opcua-reconnect', true, '重连中...');
+  showMsg('ov-opcua-reconnect-msg', '', true);
   try {
-    const [mr, tr, cr] = await Promise.all([
+    const res = await fetch('/api/opcua/reconnect', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.error || ('HTTP ' + res.status));
+    if (data.status === 'submitted') {
+      showMsg('ov-opcua-reconnect-msg', '重连请求已提交，请稍后查看状态', true);
+      toast('重连请求已提交', 'ok');
+      // 短延迟后刷新一次状态
+      setTimeout(refreshOverview, 1500);
+    } else {
+      showMsg('ov-opcua-reconnect-msg', data.error || data.status || 'unknown', false);
+      toast('重连返回: ' + (data.status || 'unknown'), 'info');
+    }
+  } catch (e) {
+    showMsg('ov-opcua-reconnect-msg', '重连失败', false);
+    toast('重连失败: ' + e.message, 'err');
+  } finally {
+    setLoading('btn-opcua-reconnect', false);
+  }
+}
+
+async function refreshOverview() {
+  let m = null, ts = null, cfg = null, os = null;
+  try {
+    const [mr, tr, cr, osr] = await Promise.all([
       fetch('/api/metrics').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/trigger_state').then(r => r.ok ? r.json() : null).catch(() => null),
       fetch('/api/config').then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/opcua/status').then(r => r.ok ? r.json() : null).catch(() => null),
     ]);
-    m = mr; ts = tr; cfg = cr;
+    m = mr; ts = tr; cfg = cr; os = osr;
   } catch (e) { return; }
 
   const taskMode = cfg ? cfg.TASK_MODE : null;
@@ -1204,8 +1270,10 @@ async function refreshOverview() {
       $('ov-trig-val').textContent = (v === true ? '1' : v === false ? '0' : '—');
     }
     $('ov-opcua').innerHTML = badge(ts.opcua_connected, '已连接', '未连接');
-    $('ov-opcua-sub').textContent = '';
+    $('ov-opcua-sub').textContent = os && os.connected ? ('已连接 ' + fmtUptime(os.uptime_seconds)) : '';
   }
+  // OPC UA 连接详情区块
+  if (os) { renderOpcuaStats(os); }
   if (!m) return;
 
   const now = Date.now() / 1000;
@@ -1334,7 +1402,8 @@ class WebUIServer:
 
     def __init__(self, opcua_url, trigger_sync_callback, status_getter,
                  metrics_getter=None, trigger_state_getter=None, port=8089,
-                 task_trigger_callback=None, task_status_getter=None):
+                 task_trigger_callback=None, task_status_getter=None,
+                 opcua_stats_getter=None, opcua_reconnect_callback=None):
         self.opcua_url = opcua_url
         self.trigger_sync_callback = trigger_sync_callback
         self.status_getter = status_getter
@@ -1343,6 +1412,9 @@ class WebUIServer:
         # 多任务模式回调（可选）
         self.task_trigger_callback = task_trigger_callback
         self.task_status_getter = task_status_getter
+        # OPC UA 连接管理回调（可选）
+        self.opcua_stats_getter = opcua_stats_getter
+        self.opcua_reconnect_callback = opcua_reconnect_callback
         self.port = int(os.getenv("WEB_UI_PORT", port))
         self._server = None
         self._thread = None
@@ -1442,6 +1514,16 @@ class WebUIServer:
                         self._send_json(500, {"error": "get tasks status failed", "detail": str(e)})
                     return
 
+                if path == "/api/opcua/status":
+                    try:
+                        if server_self.opcua_stats_getter:
+                            self._send_json(200, server_self.opcua_stats_getter())
+                        else:
+                            self._send_json(200, {"connected": False, "error": "stats getter not configured"})
+                    except Exception as e:
+                        self._send_json(500, {"error": "get opcua status failed", "detail": str(e)})
+                    return
+
                 self._send_json(404, {"error": "not found", "detail": f"unknown path: {path}"})
 
             # ---- POST 路由 ----
@@ -1463,6 +1545,10 @@ class WebUIServer:
 
                 if path == "/api/tasks/trigger":
                     self._handle_task_trigger()
+                    return
+
+                if path == "/api/opcua/reconnect":
+                    self._handle_opcua_reconnect()
                     return
 
                 self._send_json(404, {"error": "not found", "detail": f"unknown path: {path}"})
@@ -1585,6 +1671,17 @@ class WebUIServer:
                     self._send_json(400, {"error": "invalid json", "detail": str(e)})
                 except Exception as e:
                     self._send_json(500, {"error": "task trigger failed", "detail": str(e)})
+
+            def _handle_opcua_reconnect(self):
+                try:
+                    if not server_self.opcua_reconnect_callback:
+                        self._send_json(503, {"error": "reconnect not configured", "detail": "no callback"})
+                        return
+                    result = server_self.opcua_reconnect_callback()
+                    code = 200 if result.get("status") in ("submitted", "ok") else 400
+                    self._send_json(code, result)
+                except Exception as e:
+                    self._send_json(500, {"error": "opcua reconnect failed", "detail": str(e)})
 
         self._server = ThreadingHTTPServer(("0.0.0.0", self.port), Handler)
         self._thread = threading.Thread(

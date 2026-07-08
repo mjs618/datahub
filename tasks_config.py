@@ -18,6 +18,19 @@ OPC UA 节点 ID 规则：
 # OPC UA 节点 ID 命名规则。
 OPCUA_NS = 10011
 
+# 历史/实时库的数据库单元（域）。nodeId 格式为 "数据库单元:测点名.点项"。
+#   DCS_DB_UNIT : 王快（DCS）历史库域号，读取 DCS 历史值
+#   SIM_DB_UNIT : 仿真历史库域号，读取仿真历史值
+#   HICS_DB_UNIT: HICS 实时库域号，回写目标点所在域
+DCS_DB_UNIT = "10001"
+SIM_DB_UNIT = "10000"
+HICS_DB_UNIT = "10011"
+
+
+def _history_db_unit(source: str) -> str:
+    """根据数据源返回历史库域号：王快=DCS(10001)，仿真=SIM(10000)。"""
+    return SIM_DB_UNIT if source == "仿真" else DCS_DB_UNIT
+
 
 def _node(point_name: str, item: str) -> str:
     """由点名和点项构造 OPC UA NodeId。item: DV=开关量，AV=模拟量。"""
@@ -63,8 +76,8 @@ def _task(mod, n, sn, en, source, desc,
         "start_components": _components(mod, sn),
         "end_components": _components(mod, en),
         "points": [
-            {"history_id": h_instr, "target_id": tgt_instr, "target_node": _node(tgt_instr, "AV")},
-            {"history_id": h_fb,    "target_id": tgt_fb,    "target_node": _node(tgt_fb, "AV")},
+            {"history_id": f"{_history_db_unit(source)}:{h_instr}.AV", "target_id": f"{HICS_DB_UNIT}:{tgt_instr}.AV", "target_node": _node(tgt_instr, "AV")},
+            {"history_id": f"{_history_db_unit(source)}:{h_fb}.AV",    "target_id": f"{HICS_DB_UNIT}:{tgt_fb}.AV",    "target_node": _node(tgt_fb, "AV")},
         ],
     }
 

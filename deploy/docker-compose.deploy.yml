@@ -1,0 +1,65 @@
+# docker-compose.deploy.yml
+# 部署用 compose：引用已加载的预构建镜像，不在服务器上 build。
+#
+# 适用场景：
+#   - 方式B：x86 交叉构建 arm64 镜像 → docker save → 传到 ARM → docker load → 用本文件启动
+#   - 方式A：若已在本机构建过镜像 data-hub:arm64，也可直接用本文件避免重复 build
+#
+# 用法（在 ARM 服务器上，镜像已 docker load 之后）：
+#   docker compose -f docker-compose.deploy.yml up -d
+#   docker compose -f docker-compose.deploy.yml logs -f data-hub
+#
+# 镜像名默认 data-hub:arm64，与 docker-bake.hcl 的 local-arm64 target 一致。
+# 若镜像名不同，用环境变量覆盖：
+#   IMAGE=registry.example.com/data-hub:v1.0.0 docker compose -f docker-compose.deploy.yml up -d
+
+services:
+  data-hub:
+    image: ${IMAGE:-data-hub:arm64}
+    container_name: data-hub-service
+    restart: always
+    environment:
+      - BASE_IP=http://192.168.1.35:6543
+      - OPCUA_URL=opc.tcp://192.168.1.35:6810
+      - APP_CODE=data
+      - APP_SECRET=123456
+      - TRIG_NODE_ID=ns=2;s=Trigger
+      - TRIG_HISTORY_ID=10001:ICSSYS.Trigger
+      - POLL_INTERVAL=1
+      - LOOKBACK_MINUTES=10
+      - SETTLE_TIME=2
+      - HTTP_TIMEOUT=10
+      - HTTP_MAX_RETRIES=3
+      - HTTP_RETRY_BACKOFF=1.5
+      - OPCUA_RECONNECT_INTERVAL=5
+      - HISTORY_PAGE_SIZE=0
+      - ENABLE_WRITE_CACHE=true
+      - WRITE_CACHE_FILE=/data/data_hub_write_cache.json
+      - STATE_FILE=/data/data_hub_state.json
+      - ENABLE_DEDUP=true
+      - HEALTH_ENDPOINT_ENABLED=true
+      - HEALTH_ENDPOINT_PORT=8088
+      - HEALTH_STALE_THRESHOLD=60
+      - WEB_UI_PORT=8089
+      - TZ=Asia/Shanghai
+      - WATCH_LIST=["10001:ICSSYS0001.AVGV", "10002:ICSSYS0001.AVGV"]
+      - NODE_MAPPING={"10001:ICSSYS0001.AVGV":"Target:NodeA", "10002:ICSSYS0001.AVGV":"Target:NodeB"}
+    volumes:
+      - data-hub-state:/data
+    ports:
+      - "8088:8088"
+      - "8089:8089"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:8088/health', timeout=5); sys.exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  data-hub-state:
